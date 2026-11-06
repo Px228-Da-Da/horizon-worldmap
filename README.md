@@ -17,8 +17,14 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
 - **Waypoints.** Right-click for a menu: add, rename, 16 colours, three shapes, teleport
   (`/tp`), delete. Waypoints are drawn in the world with their name and distance, and one
   is made where you die.
-- **Also:** go to coordinates, a chunk grid, your trail, chunks the game has loaded but the
-  map has not read yet pulse, and the whole map exports as a PNG.
+- **Dimensions.** One button shows the Overworld, the Nether or the End from any of them,
+  with the other world's coordinates of the place under the pointer (Nether = Overworld / 8).
+- **Waypoint list** with search, nearest first.
+- **Also:** the biome under the pointer, other players on the map, go to coordinates, a chunk
+  grid, your trail, chunks the game has loaded but the map has not read yet pulse, and the
+  whole map exports as a PNG. Switches for the trail, the in-world markers, the death waypoint
+  and other players are on the mod's page in Options > Mods.
+- **Russian** interface when the game is in Russian.
 - **Keys** are in Options > Controls > Key Binds, under *World Map*, with Reset.
 
 ## Keys
@@ -31,12 +37,13 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
 | G | chunk grid |
 | H | hide or show waypoints |
 | J | go to coordinates |
+| L | waypoint list |
 | Space | centre on you |
 | `=` / `-` | zoom |
 | Page Up / Page Down | cave map top, 16 blocks |
 | Arrows or WASD | move |
 
-All of the first nine can be rebound.
+All of these can be rebound.
 
 ## Install
 
@@ -97,8 +104,14 @@ other map mod is used here; the interface and the file formats are this mod's ow
 - **Метки.** Правый клик открывает меню: создать, переименовать, 16 цветов, три формы,
   телепорт (`/tp`), удалить. Метки видны в мире с названием и расстоянием, а на месте смерти
   метка появляется сама.
-- **Ещё:** переход к координатам, сетка чанков, след игрока, подсветка чанков, которые игра
-  загрузила, а карта ещё не прочитала, и экспорт всей карты в PNG.
+- **Измерения.** Одна кнопка показывает Верхний мир, Незер или Энд из любого из них, с
+  координатами другого мира для точки под курсором (Незер = Верхний мир / 8).
+- **Список меток** с поиском, ближайшие первыми.
+- **Ещё:** биом под курсором, другие игроки на карте, переход к координатам, сетка чанков,
+  след игрока, подсветка чанков, которые игра загрузила, а карта ещё не прочитала, и экспорт
+  всей карты в PNG. Переключатели следа, меток в мире, метки смерти и игроков на странице мода
+  в Настройки > Моды.
+- **Русский** интерфейс, когда игра на русском.
 - **Клавиши** в Настройки > Управление > Назначение клавиш, раздел *World Map*, со сбросом.
 
 ## Установка

@@ -7,10 +7,11 @@ A full screen map that writes itself as you explore, for Horizon.
 - **Smooth.** Drag to move, scroll to zoom towards the pointer; far zoom blurs instead of flickering.
 - **Cave layers.** Under a roof, in a cave or in the Nether the map shows the floor round you; layered (a map for each 16 blocks of height) or full, with a Top Y slider from -64 to 319.
 - **Waypoints.** Right-click for a menu: add, rename, 16 colours, three shapes, teleport (/tp), delete. Waypoints show in the world with their name and distance, and a waypoint is made where you die.
-- **Go to coordinates, chunk grid, your trail, export the whole map as a PNG.**
-- **Keys.** A World Map section in Options > Controls > Key Binds (with Reset), nine keys, all rebindable.
+- **Dimensions and a waypoint list.** One button shows the Overworld, the Nether or the End from any of them; a list of waypoints with search, nearest first.
+- **Also:** biome under the pointer, other players, go to coordinates, chunk grid, your trail, export the whole map as a PNG, a Russian interface.
+- **Keys.** A World Map section in Options > Controls > Key Binds (with Reset), ten keys, all rebindable.
 
-Open it with **M**. Keys: B new waypoint, C cave settings, G chunk grid, H hide waypoints, J go to coordinates, Space centre on you.
+Open it with **M**. Keys: B new waypoint, C cave settings, G chunk grid, H hide waypoints, J go to coordinates, Space centre on you, L waypoint list.
 
 **What it does and doesn't do:** it reads the chunks the game has loaded around you and the game's own state, draws on its own screen, and keeps files in `config/worldmap/` (the explored chunks and a waypoints file for each world). It sends `/tp` in chat when you choose Teleport. It makes no network connection and needs no other mod.
 
