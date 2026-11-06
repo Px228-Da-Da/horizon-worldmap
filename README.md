@@ -5,6 +5,14 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
 
 > [Русская версия ниже](#world-map-для-horizon)
 
+## Screenshots
+
+![The map, with waypoints and the biome under the pointer](screenshots/map.png)
+
+![The waypoint list](screenshots/waypoints.png)
+
+![Cave map settings](screenshots/caves.png)
+
 ## Features
 
 - **Self-writing map.** The terrain you have seen stays on the map after you leave, kept
