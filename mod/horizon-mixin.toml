@@ -1,0 +1,199 @@
+[mod]
+id = "worldmap"
+version = "0.4.1"
+priority = 100
+
+# The Horizon commit it is written for (the Nightly the launcher builds). It uses
+# only the native hook points and the mod screen (`native_mod_screen_open`) and
+# image (`native_mod_image`) the game already has.
+[compatibility]
+horizon_revision = "66f3981f522b24c250b21523a70080965b940424"
+
+# The terrain scan, the explored map on disk and its image: added to the
+# minimap's file, which has the column scan and the map colours it reuses.
+[[module]]
+id = "core"
+file = "crates/horizon-client-render/src/minimap.rs"
+name = "worldmap_core"
+source = "core.rs"
+visibility = "pub"
+
+# The game side: state, the screen, the waypoints and their markers.
+[[module]]
+id = "runtime"
+file = "crates/horizon-client/src/game.rs"
+name = "official_worldmap"
+source = "runtime.rs"
+
+[[injection]]
+id = "list"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_mods"
+helper = "list.rs"
+bindings = [
+  { name = "mods", ty = "&mut Vec<crate::game::native_hooks::NativeMod>", value = "&mut *mods" },
+]
+
+[[injection]]
+id = "frame"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_frame"
+helper = "frame.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+]
+
+[[injection]]
+id = "key"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_key"
+helper = "key.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "key", ty = "&str", value = "key" },
+  { name = "pressed", ty = "bool", value = "pressed" },
+]
+
+[[injection]]
+id = "hud"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_hud"
+helper = "hud.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "&mut *batch" },
+]
+
+[[injection]]
+id = "render"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_render_post"
+helper = "render.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "&mut *batch" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+]
+
+[[injection]]
+id = "press"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_button_pressed_pre"
+helper = "press.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "release"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_button_released_pre"
+helper = "release.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "drag"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_dragged_pre"
+helper = "drag.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "delta", ty = "[f32; 2]", value = "delta" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "scroll"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_scrolled_pre"
+helper = "scroll.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&horizon_client::mod_api::NativeScreenView<'_>", value = "screen" },
+  { name = "scroll", ty = "[f64; 2]", value = "scroll" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "typed"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_char_typed_pre"
+helper = "typed.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "c", ty = "char", value = "c" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "screenkey"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_key_pressed_pre"
+helper = "screenkey.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "key", ty = "&str", value = "key" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# The mod's keys in Options > Controls > Key Binds, as rows under the game's own.
+[[injection]]
+id = "keybinds"
+kind = "RETURN"
+target = "horizon_client_render::options_ui::OptionsUi::layout"
+helper = "keybinds.rs"
+bindings = [
+  { name = "value", ty = "(Vec<Widget>, f32, f32, f32)", value = "$value" },
+  { name = "ui", ty = "&OptionsUi", value = "&*self" },
+  { name = "s", ty = "&Settings", value = "s" },
+  { name = "w", ty = "f32", value = "w" },
+]
+
+# A Reset button of the mod's keys in Key Binds.
+[[injection]]
+id = "click"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings_click"
+helper = "click.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "button", ty = "usize", value = "button" },
+]
+
+# What the Key Binds rows need between the game's calls: whether the page is being laid
+# out, and how many pixels the mods' rows add to its list.
+[[module]]
+id = "keystate"
+file = "crates/horizon-client-render/src/options_ui.rs"
+name = "worldmap_keys"
+source = "keystate.rs"
+
+[[injection]]
+id = "keybinds-enter"
+kind = "HEAD"
+target = "horizon_client_render::options_ui::OptionsUi::layout"
+helper = "keyenter.rs"
+bindings = []
+
+# The scroll the game keeps (`clamp_scroll`), with the mods' rows in the list's height
+# while the page is laid out: the game cuts the scroll inside `layout`, before they are added.
+[[injection]]
+id = "keybinds-clamp"
+kind = "OVERWRITE"
+target = "horizon_client_render::options_ui::OptionsUi::clamp_scroll"
+helper = "keyclamp.rs"
+bindings = [
+  { name = "ui", ty = "&mut OptionsUi", value = "&mut *self" },
+  { name = "top", ty = "f32", value = "top" },
+  { name = "bottom", ty = "f32", value = "bottom" },
+  { name = "content", ty = "f32", value = "content" },
+]
