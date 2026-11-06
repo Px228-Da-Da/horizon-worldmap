@@ -1,6 +1,6 @@
 [mod]
 id = "worldmap"
-version = "0.5.0"
+version = "0.6.0"
 priority = 100
 
 # The Horizon commit it is written for (the Nightly the launcher builds). It uses

@@ -7,7 +7,7 @@
 use super::Game;
 use horizon_client::{
     hud::{HudBatch, MOD_IMAGE_SPRITE},
-    minimap::worldmap_core::{FULL, SURFACE, WorldMap, cave_layer, layer_top},
+    minimap::worldmap_core::{DAY, FULL, LIVE, SURFACE, WorldMap, cave_layer, layer_top},
     mod_api::NativeScreenView,
 };
 use std::{
@@ -21,14 +21,14 @@ use std::{
 /// The mod's id (its settings and keys), name and version.
 pub const ID: &str = "worldmap";
 pub const NAME: &str = "World Map";
-pub const VERSION: &str = "0.5.0";
+pub const VERSION: &str = "0.6.0";
 pub const DESCRIPTION: &str = "A full screen map of everything you have explored, kept between visits: drag to move, scroll to zoom, right-click for a menu (teleport, waypoints, PNG export). Waypoints show in the world too.";
 pub const KEY_NAME: &str = "open";
 pub const DEFAULT_KEY: &str = "key.keyboard.m";
 
 /// The mod's keys, as Options lists them: name, label and the default key. The
 /// player's choices are kept by the game (`native_mod_key`).
-pub const KEYS: [(&str, &str, &str); 10] = [
+pub const KEYS: [(&str, &str, &str); 12] = [
     ("open", "Open World Map", "key.keyboard.m"),
     ("waypoint", "New Waypoint", "key.keyboard.b"),
     ("caves", "Cave Mode Settings", "key.keyboard.c"),
@@ -39,10 +39,16 @@ pub const KEYS: [(&str, &str, &str); 10] = [
     ("waypoints", "Toggle Waypoints", "key.keyboard.h"),
     ("goto", "Go to Coordinates", "key.keyboard.j"),
     ("list", "Waypoint List", "key.keyboard.l"),
+    ("minimap", "Toggle Minimap", "key.keyboard.n"),
+    ("minimap_zoom", "Minimap Zoom", "key.keyboard.z"),
 ];
 
 /// CPU time the scan may take per frame.
 const SCAN_BUDGET: Duration = Duration::from_micros(1500);
+/// The same while the map is open: the player is looking at it, so it may take more.
+const SCAN_BUDGET_OPEN: Duration = Duration::from_micros(6000);
+/// And while the minimap is cut at the player's height, which changes with every jump.
+const SCAN_BUDGET_LIVE: Duration = Duration::from_micros(4000);
 const SAVE_EVERY: Duration = Duration::from_secs(20);
 const ZOOM_MIN: f32 = 0.25;
 const ZOOM_MAX: f32 = 64.0;
@@ -82,6 +88,12 @@ const TOOLS: [(&str, f32); 9] = [
 ];
 const TOOL_H: f32 = 20.0;
 const TOOL_GAP: f32 = 4.0;
+
+/// The minimap: its sizes in GUI pixels, its scales in blocks to a pixel, and its corners.
+const MINI_SIZES: [f32; 3] = [72.0, 96.0, 128.0];
+const MINI_ZOOMS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
+const MINI_CORNERS: [&str; 4] = ["Top left", "Top right", "Bottom left", "Bottom right"];
+const MINI_SIZE_NAMES: [&str; 3] = ["Small", "Medium", "Large"];
 
 /// The cave panel: its width, and the heights of its head, its rows and its help.
 const CAVE_W: f32 = 222.0;
@@ -138,6 +150,7 @@ impl MenuKind {
                 "Teleport here",
                 "Change color",
                 "Change shape",
+                "Group...",
                 "Delete",
             ],
             Self::Ground { .. } => &["Teleport here", "New waypoint here", "Export PNG"],
@@ -159,6 +172,80 @@ fn menu_row_at(at: [f32; 2], width: f32, mouse: [f32; 2], rows: usize) -> Option
     (row < rows).then_some(row)
 }
 
+/// A row of the waypoint list: a waypoint, or the heading of a group.
+enum ListRow {
+    Item(usize),
+    Group(String),
+}
+
+/// The colours of the sixteen chat colours, which other map mods number their waypoints'.
+const OTHER_COLORS: [u32; 16] = [
+    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xFFAA00, 0xAAAAAA, 0x555555,
+    0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+];
+
+/// The colour of this mod's palette nearest to `rgb`.
+fn nearest_color(rgb: u32) -> u32 {
+    let part = |c: u32, s: u32| i64::from(c >> s & 255);
+    let far = |c: u32| {
+        (part(c, 16) - part(rgb, 16)).pow(2)
+            + (part(c, 8) - part(rgb, 8)).pow(2)
+            + (part(c, 0) - part(rgb, 0)).pow(2)
+    };
+    COLORS.iter().copied().min_by_key(|&c| far(c)).unwrap_or(COLORS[0])
+}
+
+/// A waypoint from a line of a waypoints file: this mod's (tab separated: name, x, y, z,
+/// colour, dimension, shape, group), or another map mod's (`waypoint:name:initials:x:y:z:
+/// colour:disabled:type:set:...`, with the dimension unsaid: `dim`).
+fn parse_waypoint(line: &str, dim: &str) -> Option<Waypoint> {
+    let line = line.trim_end_matches('\r');
+    if let Some(rest) = line.strip_prefix("waypoint:") {
+        let f: Vec<&str> = rest.split(':').collect();
+        if f.len() < 6 {
+            return None;
+        }
+        let group = f
+            .get(8)
+            .filter(|g| !g.is_empty() && !g.starts_with("gui."))
+            .map(|g| g.replace("\u{a7}\u{a7}", ":"))
+            .unwrap_or_default();
+        return Some(Waypoint {
+            name: f[0].replace("\u{a7}\u{a7}", ":"),
+            x: f[2].parse().ok()?,
+            y: f[3].parse().unwrap_or(64),
+            z: f[4].parse().ok()?,
+            color: nearest_color(OTHER_COLORS[f[5].parse::<usize>().ok()?.min(15)]),
+            dim: dim.to_owned(),
+            shape: 0,
+            group,
+        });
+    }
+    let f: Vec<&str> = line.split('\t').collect();
+    if f.len() < 6 {
+        return None;
+    }
+    let (Ok(x), Ok(y), Ok(z), Ok(color)) = (
+        f[1].parse::<i32>(),
+        f[2].parse::<i32>(),
+        f[3].parse::<i32>(),
+        u32::from_str_radix(f[4], 16),
+    ) else {
+        return None;
+    };
+    let shape = f.get(6).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+    Some(Waypoint {
+        name: f[0].to_owned(),
+        x,
+        y,
+        z,
+        color,
+        dim: f[5].to_owned(),
+        shape: shape % SHAPES as u8,
+        group: f.get(7).map(|g| (*g).to_owned()).unwrap_or_default(),
+    })
+}
+
 struct Waypoint {
     name: String,
     x: i32,
@@ -167,6 +254,8 @@ struct Waypoint {
     color: u32,
     dim: String,
     shape: u8,
+    /// The group it is in, "" for none: a group can be hidden together.
+    group: String,
 }
 
 struct State {
@@ -197,6 +286,28 @@ struct State {
     img_view: Option<(f64, f64, f32, usize, usize)>,
     /// The player: x, y, z, yaw; and where they have been lately.
     player: (f64, f64, f64, f32),
+    /// How light the sky is, 0 (night) to `DAY` (full day); what the surface is drawn under.
+    sky: u8,
+    /// The world's name, its seed, and the folder they gave (read once, not every frame).
+    key_memo: Option<(String, i64, String)>,
+    /// A dragged map keeps going when let go, like a map on a phone: its speed in GUI
+    /// pixels a second, the speed of the drag, when the last drag step was, and when the
+    /// glide last moved.
+    glide: (f64, f64),
+    drag_vel: (f64, f64),
+    drag_at: Option<Instant>,
+    glide_at: Instant,
+    /// The width of the box of the map's numbers at the bottom left (the cave panel keeps clear of it).
+    info_w: f32,
+    /// What the shared image of the mod holds: nothing, the map screen's, the minimap's.
+    slot: u8,
+    /// Underground, the player's feet (the minimap is cut at their head), NaN on the surface.
+    live_anchor: f64,
+    /// The minimap's scale, a place in `MINI_ZOOMS`.
+    mini_zoom: usize,
+    /// Where the minimap is centred and which way it faces: the camera between ticks, so it
+    /// moves smoothly (x, z, yaw).
+    mini_at: (f64, f64, f32),
     trail: Vec<(f64, f64)>,
     /// A waypoint's name being typed, and where it goes (`editing`: the waypoint
     /// being renamed, else a new one).
@@ -246,6 +357,9 @@ struct State {
     /// Waypoints are shown, the coordinates being typed for Go to, where the player was
     /// last alive, and whether they were dead a frame ago.
     show_waypoints: bool,
+    /// The groups whose waypoints are hidden, and whether the name box holds a group.
+    hidden_groups: std::collections::HashSet<String>,
+    editing_group: bool,
     goto: Option<String>,
     alive_at: (f64, f64, f64),
     was_dead: bool,
@@ -277,6 +391,17 @@ impl State {
             img: (0, 0, 1.0),
             img_view: None,
             player: (0.0, 64.0, 0.0, 0.0),
+            sky: DAY,
+            key_memo: None,
+            glide: (0.0, 0.0),
+            drag_vel: (0.0, 0.0),
+            drag_at: None,
+            glide_at: Instant::now(),
+            info_w: 150.0,
+            slot: 0,
+            mini_zoom: 2,
+            mini_at: (0.0, 0.0, 0.0),
+            live_anchor: f64::NAN,
             trail: Vec::new(),
             entering: None,
             editing: None,
@@ -305,6 +430,8 @@ impl State {
             list_focus: false,
             list_scroll: 0.0,
             show_waypoints: true,
+            hidden_groups: std::collections::HashSet::new(),
+            editing_group: false,
             goto: None,
             alive_at: (0.0, 64.0, 0.0),
             was_dead: false,
@@ -373,37 +500,37 @@ impl State {
 
     fn load_waypoints(&mut self) {
         self.waypoints.clear();
+        self.hidden_groups.clear();
         self.wp_dirty = false;
         let Some(path) = &self.wp_file else {
             return;
         };
+        if let Ok(text) = std::fs::read_to_string(path.with_file_name("groups.txt")) {
+            self.hidden_groups = text
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
-        for line in text.lines() {
-            let f: Vec<&str> = line.split('\t').collect();
-            if f.len() < 6 {
-                continue;
-            }
-            let (Ok(x), Ok(y), Ok(z), Ok(color)) = (
-                f[1].parse::<i32>(),
-                f[2].parse::<i32>(),
-                f[3].parse::<i32>(),
-                u32::from_str_radix(f[4], 16),
-            ) else {
-                continue;
-            };
-            let shape = f.get(6).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
-            self.waypoints.push(Waypoint {
-                name: f[0].to_owned(),
-                x,
-                y,
-                z,
-                color,
-                dim: f[5].to_owned(),
-                shape: shape % SHAPES as u8,
-            });
+        self.waypoints = text
+            .lines()
+            .filter_map(|line| parse_waypoint(line, "minecraft:overworld"))
+            .collect();
+    }
+
+    /// The waypoints as the file keeps them, a line each, tab separated.
+    fn waypoints_text(&self) -> String {
+        let mut text = String::new();
+        for w in &self.waypoints {
+            text.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{:06x}\t{}\t{}\t{}\n",
+                w.name, w.x, w.y, w.z, w.color, w.dim, w.shape, w.group
+            ));
         }
+        text
     }
 
     fn save_waypoints(&mut self) {
@@ -414,16 +541,83 @@ impl State {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let mut text = String::new();
-        for w in &self.waypoints {
-            text.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{:06x}\t{}\t{}\n",
-                w.name, w.x, w.y, w.z, w.color, w.dim, w.shape
-            ));
-        }
-        if let Err(e) = std::fs::write(path, text) {
+        if let Err(e) = std::fs::write(path, self.waypoints_text()) {
             log::warn!("World Map: could not save the waypoints: {e}");
         }
+        let groups_file = path.with_file_name("groups.txt");
+        if self.hidden_groups.is_empty() {
+            let _ = std::fs::remove_file(groups_file);
+        } else {
+            let mut hidden: Vec<&str> = self.hidden_groups.iter().map(String::as_str).collect();
+            hidden.sort_unstable();
+            let _ = std::fs::write(groups_file, hidden.join("\n") + "\n");
+        }
+    }
+
+    /// Whether a waypoint is shown: not in a group that is hidden.
+    fn group_visible(&self, w: &Waypoint) -> bool {
+        w.group.is_empty() || !self.hidden_groups.contains(&w.group)
+    }
+
+    /// Write the waypoints to `exports/waypoints.txt` in the map's folder.
+    fn export_waypoints(&mut self) {
+        let Some(base) = self.wp_file.as_ref().and_then(|p| p.parent()) else {
+            return;
+        };
+        let dir = base.join("exports");
+        let result = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(dir.join("waypoints.txt"), self.waypoints_text()));
+        let n = self.waypoints.len();
+        let line = match result {
+            Ok(()) if ru() => format!("Метки ({n}) сохранены в exports/waypoints.txt"),
+            Ok(()) => format!("{n} waypoints saved to exports/waypoints.txt"),
+            Err(e) if ru() => format!("Не удалось сохранить метки: {e}"),
+            Err(e) => format!("Could not save the waypoints: {e}"),
+        };
+        self.notice = Some((line, Instant::now()));
+    }
+
+    /// Read waypoints from `exports/import.txt` in the map's folder: this mod's own file
+    /// (the one that is exported) or a waypoints file of another map mod; those that are
+    /// already here are skipped.
+    fn import_waypoints(&mut self) {
+        let Some(base) = self.wp_file.as_ref().and_then(|p| p.parent()) else {
+            return;
+        };
+        let path = base.join("exports").join("import.txt");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            let line = if ru() {
+                "Положите файл меток в exports/import.txt в папке карты".to_owned()
+            } else {
+                "Put a waypoints file at exports/import.txt in the map's folder".to_owned()
+            };
+            self.notice = Some((line, Instant::now()));
+            return;
+        };
+        let dim = self.view_dim_id().to_owned();
+        let mut added = 0;
+        for line in text.lines() {
+            let Some(w) = parse_waypoint(line, &dim) else {
+                continue;
+            };
+            let known = self
+                .waypoints
+                .iter()
+                .any(|o| o.name == w.name && o.x == w.x && o.y == w.y && o.z == w.z && o.dim == w.dim);
+            if !known {
+                self.waypoints.push(w);
+                added += 1;
+            }
+        }
+        if added > 0 {
+            self.wp_dirty = true;
+        }
+        let line = if ru() {
+            format!("Добавлено меток: {added}")
+        } else {
+            format!("{added} waypoints added")
+        };
+        self.notice = Some((line, Instant::now()));
     }
 
     /// The screen is about to open on the player.
@@ -442,7 +636,27 @@ impl State {
         self.img_view = None;
         self.zoom_to = self.bpp;
         self.zoom_anchor = None;
+        self.glide = (0.0, 0.0);
+        self.drag_at = None;
         self.map.invalidate();
+    }
+
+    /// One step of the glide after a drag: the map slides on and slows down.
+    fn glide_step(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.glide_at).as_secs_f64().min(0.05);
+        self.glide_at = now;
+        let speed = self.glide.0.hypot(self.glide.1);
+        if speed < 12.0 {
+            self.glide = (0.0, 0.0);
+            return;
+        }
+        let bpp = f64::from(self.bpp);
+        self.cx -= self.glide.0 * dt * bpp;
+        self.cz -= self.glide.1 * dt * bpp;
+        self.zoom_anchor = None;
+        let keep = (-dt * 3.2).exp();
+        self.glide = (self.glide.0 * keep, self.glide.1 * keep);
     }
 
     /// One step of the zoom's ease towards where it is going, a frame at a time.
@@ -466,11 +680,162 @@ impl State {
         }
     }
 
+    /// The minimap's side in GUI pixels.
+    fn mini_size(&self) -> f32 {
+        MINI_SIZES[usize::from(self.settings.size).min(MINI_SIZES.len() - 1)]
+    }
+
+    /// Where the minimap is on a screen of `gw` x `gh`.
+    fn mini_rect(&self, gw: f32, gh: f32) -> [f32; 4] {
+        let size = self.mini_size();
+        let margin = 8.0;
+        let (x, y) = match self.settings.corner {
+            0 => (margin, margin),
+            // Under the status effects of the game.
+            1 => (gw - size - margin, margin + 26.0),
+            2 => (margin, gh - size - margin - 24.0),
+            _ => (gw - size - margin, gh - size - margin - 24.0),
+        };
+        [x.round(), y.round(), size, size]
+    }
+
+    /// The minimap's image around the player, when it changed.
+    fn mini_compose(&mut self) -> Option<(usize, Vec<u8>)> {
+        let size = self.mini_size() as usize;
+        if self.slot != 2 {
+            self.map.invalidate();
+        }
+        let (px, pz, yaw) = self.mini_at;
+        // Underground it is the floor at the player's height, else the surface.
+        let layer = if self.live_anchor.is_finite() { LIVE } else { self.view_layer };
+        let light = if self.settings.lighting && layer == SURFACE {
+            self.sky
+        } else {
+            DAY
+        };
+        let bpp = MINI_ZOOMS[self.mini_zoom.min(MINI_ZOOMS.len() - 1)];
+        let turned = self.settings.rotate.then_some(yaw);
+        if self.map.compose(layer, px, pz, bpp, size, size, light, turned) {
+            self.slot = 2;
+            Some((size, self.map.image.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// The minimap in a corner of the game: the map round the player, turned the way they
+    /// face (or north up), the waypoints (those off it on its edge), the sides of the world
+    /// and the player's place.
+    fn draw_minimap(&self, game: &Game<'_>, batch: &mut HudBatch) {
+        if !self.settings.minimap || self.slot != 2 || !self.settings_loaded {
+            return;
+        }
+        let (gw, gh) = (batch.width, batch.height);
+        let [x, y, size, _] = self.mini_rect(gw, gh);
+        // A frame: dark, a lighter edge, dark.
+        game.native_fill(batch, [x - 3.0, y - 3.0, size + 6.0, size + 6.0], 0xFF0A_0C12);
+        game.native_fill(batch, [x - 2.0, y - 2.0, size + 4.0, size + 4.0], 0xFF5A_6578);
+        game.native_fill(batch, [x - 1.0, y - 1.0, size + 2.0, size + 2.0], 0xFF0A_0C12);
+        let _ = game.native_sprite(batch, MOD_IMAGE_SPRITE, [0.0, 0.0, size, size], [x, y, size, size]);
+        let bpp = MINI_ZOOMS[self.mini_zoom.min(MINI_ZOOMS.len() - 1)];
+        let py = self.player.1;
+        let (px, pz, yaw) = self.mini_at;
+        let half = size / 2.0;
+        let centre = (x + half, y + half);
+        // Forward on the map: where the player faces when it turns, else north.
+        let (sin, cos) = f64::from(yaw).to_radians().sin_cos();
+        let (fx, fz) = if self.settings.rotate { (-sin, cos) } else { (0.0, -1.0) };
+        // A direction of the world as the minimap shows it, right and down.
+        let seen = |wx: f64, wz: f64| -> (f32, f32) {
+            ((-fz * wx + fx * wz) as f32, (-(fx * wx + fz * wz)) as f32)
+        };
+        for w in self
+            .waypoints
+            .iter()
+            .filter(|w| self.show_waypoints && w.dim == self.dim() && self.group_visible(w))
+        {
+            let (u, v) = seen(f64::from(w.x) + 0.5 - px, f64::from(w.z) + 0.5 - pz);
+            let (mut mx, mut mz, mut r) = (u / bpp, v / bpp, 2.5);
+            if mx.abs() > half - 3.0 || mz.abs() > half - 3.0 {
+                // Off the minimap: on its edge, in the waypoint's direction.
+                let k = (half - 3.0) / mx.abs().max(mz.abs());
+                mx *= k;
+                mz *= k;
+                r = 1.8;
+            }
+            marker(game, batch, centre.0 + mx, centre.1 + mz, r, w.color, w.shape);
+        }
+        // The other players: a white diamond each, bright at the player's height and dim above
+        // or below it.
+        if self.settings.players {
+            for e in game.native_client_entities() {
+                if !e.alive || e.invisible || e.player_name.is_none() {
+                    continue;
+                }
+                let (dx, dz) = (e.position[0] - px, e.position[2] - pz);
+                let player = true;
+                if dx.hypot(dz) < 1.2 {
+                    continue;
+                }
+                let (u, v) = seen(dx, dz);
+                let (mx, mz) = (u / bpp, v / bpp);
+                if mx.abs() > half - 2.0 || mz.abs() > half - 2.0 {
+                    continue;
+                }
+                let away = (e.position[1] - py).abs().min(24.0);
+                let alpha = 255 - (away / 24.0 * 165.0) as u32;
+                let (r, rgb) = if player { (2.6, 0xFFFFFF) } else { (2.0, 0xFFE04B) };
+                let (cx, cy) = (centre.0 + mx, centre.1 + mz);
+                game.native_quad(
+                    batch,
+                    [[cx, cy - r], [cx + r, cy], [cx, cy + r], [cx - r, cy]],
+                    (alpha << 24) | rgb,
+                );
+            }
+        }
+        // The player: a small chevron, pointing up when the map turns.
+        let f = if self.settings.rotate {
+            [0.0, -1.0]
+        } else {
+            [-sin as f32, cos as f32]
+        };
+        let n = [-f[1], f[0]];
+        let at = |a: f32, b: f32| [centre.0 + f[0] * a + n[0] * b, centre.1 + f[1] * a + n[1] * b];
+        game.native_quad(
+            batch,
+            [at(6.0, 0.0), at(-3.5, 4.0), at(-1.0, 0.0), at(-3.5, -4.0)],
+            0xFF00_0000 | ACCENT,
+        );
+        game.native_quad(
+            batch,
+            [at(4.0, 0.0), at(-2.2, 2.5), at(-0.4, 0.0), at(-2.2, -2.5)],
+            0xFFFF_FFFF,
+        );
+        // The sides of the world, on the edge: north (red), east, south, west.
+        let names: [&str; 4] = if ru() { ["С", "В", "Ю", "З"] } else { ["N", "E", "S", "W"] };
+        for (name, (wx, wz)) in names.iter().zip([(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)]) {
+            let (u, v) = seen(wx, wz);
+            let k = (half - 6.0) / u.abs().max(v.abs());
+            let (lx, ly) = (centre.0 + u * k, centre.1 + v * k);
+            let fill = if *name == names[0] { 0xFFB0_3030 } else { 0xFF2B_3A6B };
+            game.native_fill(batch, [lx - 5.0, ly - 5.0, 10.0, 10.0], 0xFF0A_0C12);
+            game.native_fill(batch, [lx - 4.0, ly - 4.0, 8.0, 8.0], fill);
+            centered_text(game, batch, name, lx, ly - 3.5, 0xFFFFFF);
+        }
+        // Where the player is, under the minimap (over it in the lower corners).
+        let label = format!("{} {} {}", px.floor() as i32, py.floor() as i32, pz.floor() as i32);
+        let w = width_of(game, &label);
+        let ly = if self.settings.corner >= 2 { y - 12.0 } else { y + size + 5.0 };
+        say(game, batch, &label, [(centre.0 - w / 2.0).round(), ly], TEXT, true);
+    }
+
     /// The cave panel: `[x, y, width, height]`, over the toolbar.
     fn cave_rect(&self) -> [f32; 4] {
         let h = CAVE_HEAD + CAVE_ROWS as f32 * CAVE_ROW + CAVE_HELP;
+        let centred = ((self.gui.0 - CAVE_W) / 2.0).round();
+        let clear = (self.info_w + 14.0).min(self.gui.0 - CAVE_W - 6.0);
         [
-            ((self.gui.0 - CAVE_W) / 2.0).round(),
+            centred.max(clear),
             self.gui.1 - TOOL_H - 12.0 - h,
             CAVE_W,
             h,
@@ -583,6 +948,7 @@ impl State {
             color: 0xE04040,
             dim,
             shape: 2,
+            group: String::new(),
         });
         self.wp_dirty = true;
     }
@@ -628,7 +994,14 @@ impl State {
         self.img = (iw, ih, scale);
         let (ix, iz, b, w, h) = self.img_view?;
         let layer = self.shown_layer();
-        if self.shown_mut().compose(layer, ix, iz, b, w, h) {
+        // The surface of the world the player is in, under its sky: dark at night.
+        let light = if self.settings.lighting && layer == SURFACE && !self.viewing_other() {
+            self.sky
+        } else {
+            DAY
+        };
+        if self.shown_mut().compose(layer, ix, iz, b, w, h, light, None) {
+            self.slot = 1;
             Some((w, h, self.shown().image.clone()))
         } else {
             None
@@ -771,15 +1144,41 @@ impl State {
         found.into_iter().map(|f| f.1).collect()
     }
 
-    /// The waypoint of the list a point is on.
-    fn list_row_at(&self, p: [f32; 2]) -> Option<usize> {
+    /// The rows of the list: the waypoints, and when some are in groups a heading for each
+    /// group (those with none last).
+    fn list_rows(&self) -> Vec<ListRow> {
+        let items = self.list_items();
+        if items.iter().all(|&i| self.waypoints[i].group.is_empty()) {
+            return items.into_iter().map(ListRow::Item).collect();
+        }
+        let mut groups: Vec<String> = items.iter().map(|&i| self.waypoints[i].group.clone()).collect();
+        groups.sort_by_key(|g| (g.is_empty(), g.to_lowercase()));
+        groups.dedup();
+        let mut rows = Vec::new();
+        for g in groups {
+            rows.push(ListRow::Group(g.clone()));
+            rows.extend(items.iter().filter(|&&i| self.waypoints[i].group == g).map(|&i| ListRow::Item(i)));
+        }
+        rows
+    }
+
+    /// The row of the list a point is on.
+    fn list_row_at(&self, p: [f32; 2]) -> Option<ListRow> {
         let r = self.list_rect();
         let top = r[1] + 36.0;
-        if !inside(r, p) || p[1] < top || p[1] > r[1] + r[3] - 2.0 {
+        if !inside(r, p) || p[1] < top || p[1] > r[1] + r[3] - 20.0 {
             return None;
         }
         let row = ((p[1] - top + self.list_scroll) / 14.0) as usize;
-        self.list_items().get(row).copied()
+        self.list_rows().into_iter().nth(row)
+    }
+
+    /// The list's Export and Import buttons, under its rows.
+    fn list_buttons(&self) -> ([f32; 4], [f32; 4]) {
+        let r = self.list_rect();
+        let w = ((r[2] - 18.0) / 2.0).floor();
+        let y = r[1] + r[3] - 17.0;
+        ([r[0] + 6.0, y, w, 14.0], [r[0] + 12.0 + w, y, w, 14.0])
     }
 
     /// The name dialog: `[x, y, width, height]`, in the middle.
@@ -837,7 +1236,7 @@ impl State {
         }
         let mut best: Option<(usize, f32)> = None;
         for (i, w) in self.waypoints.iter().enumerate() {
-            if w.dim != self.view_dim_id() {
+            if w.dim != self.view_dim_id() || !self.group_visible(w) {
                 continue;
             }
             let (x, y) = self.to_screen(f64::from(w.x) + 0.5, f64::from(w.z) + 0.5);
@@ -961,6 +1360,7 @@ impl State {
                 0 => self.teleport(x, self.ground_y(x, z).unwrap_or(self.player.1 as i32), z),
                 1 => {
                     self.editing = None;
+                    self.editing_group = false;
                     self.entering_color = None;
                     self.entering = Some((String::new(), x, z));
                 }
@@ -988,6 +1388,7 @@ impl State {
                         w.shape = (w.shape + 1) % SHAPES as u8;
                         self.wp_dirty = true;
                     }
+                    4 => self.begin_group(i),
                     _ => {
                         self.waypoints.remove(i);
                         self.wp_dirty = true;
@@ -1022,6 +1423,17 @@ impl State {
         let w = &self.waypoints[i];
         self.entering = Some((w.name.clone(), w.x, w.z));
         self.editing = Some(i);
+        self.editing_group = false;
+        self.entering_color = None;
+        self.skip_char = None;
+    }
+
+    /// Waypoint `i`'s group: its name in the box (empty: none).
+    fn begin_group(&mut self, i: usize) {
+        let w = &self.waypoints[i];
+        self.entering = Some((w.group.clone(), w.x, w.z));
+        self.editing = Some(i);
+        self.editing_group = true;
         self.entering_color = None;
         self.skip_char = None;
     }
@@ -1029,6 +1441,7 @@ impl State {
     fn begin_waypoint(&mut self, at: [f32; 2]) {
         let (x, z) = self.to_world(at);
         self.editing = None;
+        self.editing_group = false;
         self.entering_color = None;
         self.entering = Some((String::new(), x.floor() as i32, z.floor() as i32));
     }
@@ -1038,6 +1451,15 @@ impl State {
             return;
         };
         let name = name.trim().to_owned();
+        if self.editing_group {
+            self.editing_group = false;
+            self.entering_color = None;
+            if let Some(w) = self.editing.take().and_then(|i| self.waypoints.get_mut(i)) {
+                w.group = name;
+                self.wp_dirty = true;
+            }
+            return;
+        }
         let picked = self.entering_color.take();
         if let Some(i) = self.editing.take() {
             if let Some(w) = self.waypoints.get_mut(i) {
@@ -1067,6 +1489,7 @@ impl State {
             color,
             dim,
             shape: 0,
+            group: String::new(),
         });
         self.wp_dirty = true;
     }
@@ -1151,8 +1574,47 @@ fn ours(game: &Game<'_>) -> bool {
     game.native_mod_screen() == Some(ID)
 }
 
-/// The world's folder name for the map files: a single player world by its name
-/// (the window's handle on its server has it), a server by its address.
+/// Whether a server address (`host:port`) is this computer.
+fn is_loopback(address: &str) -> bool {
+    if address == "::1" {
+        return true;
+    }
+    let host = match address.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => address.rsplit_once(':').map_or(address, |(host, _)| host),
+    };
+    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
+}
+
+/// Worlds can have the same name ("New World" in three save folders), so the name alone
+/// would give them one map. The folder of a single player world holds the seed of the world
+/// that made it: the first world to use it writes its seed there, and a world with another
+/// seed gets a folder of its own (`<name>-<seed>`).
+fn world_folder(key: String, seed: i64) -> String {
+    if !key.starts_with("sp-") || seed == 0 {
+        return key;
+    }
+    let Ok(config) = Game::native_config_dir() else {
+        return key;
+    };
+    let dir = config.join("worldmap").join(&key);
+    let marker = dir.join("seed.txt");
+    match std::fs::read_to_string(&marker) {
+        Ok(text) if text.trim() == seed.to_string() => key,
+        Ok(_) => format!("{key}-{seed:x}"),
+        Err(_) => {
+            // Not claimed yet: it is this world's (the maps made before took its name).
+            move_old_maps(&key);
+            if std::fs::create_dir_all(&dir).is_ok() {
+                let _ = std::fs::write(&marker, seed.to_string());
+            }
+            key
+        }
+    }
+}
+
+/// The world's folder name for the map files: a single player world by its name and seed,
+/// a friend's world by its seed, a server by its address.
 fn world_key(game: &Game<'_>) -> String {
     let single_player = game
         .integrated
@@ -1175,6 +1637,13 @@ fn world_key(game: &Game<'_>) -> String {
     let raw = match single_player {
         Some(name) => format!("sp-{name}"),
         None => match game.native_client_state().and_then(|c| c.server_address) {
+            // A friend's world (Play with Friends) is reached through a tunnel on this
+            // computer, at an address that is the same for every friend: such a world is
+            // told apart by its seed instead.
+            Some(address) if is_loopback(&address) => match game.remote.as_ref() {
+                Some(remote) => format!("friend-{:x}", remote.hashed_seed),
+                None => format!("mp-{address}"),
+            },
             Some(address) => format!("mp-{address}"),
             None => "local".to_owned(),
         },
@@ -1322,6 +1791,24 @@ fn ru_text(text: &str) -> Option<&'static str> {
         "Markers in the world" => "Метки в мире",
         "Waypoint on death" => "Метка при смерти",
         "Other players on the map" => "Другие игроки на карте",
+        "Day and night on the map" => "День и ночь на карте",
+        "Minimap" => "Миникарта",
+        "Rotate the minimap" => "Вращать миникарту",
+        "Group..." => "Группа...",
+        "Waypoint group" => "Группа метки",
+        "No group" => "Без группы",
+        "Import" => "Импорт",
+        "Minimap corner" => "Угол миникарты",
+        "Minimap size" => "Размер миникарты",
+        "Top left" => "Слева сверху",
+        "Top right" => "Справа сверху",
+        "Bottom left" => "Слева снизу",
+        "Bottom right" => "Справа снизу",
+        "Small" => "Малая",
+        "Medium" => "Средняя",
+        "Large" => "Большая",
+        "Toggle Minimap" => "Миникарта вкл/выкл",
+        "Minimap Zoom" => "Масштаб миникарты",
         "Open World Map" => "Открыть карту мира",
         "New Waypoint" => "Новая метка",
         "Cave Mode Settings" => "Настройки пещер",
@@ -1342,11 +1829,14 @@ fn ru_text(text: &str) -> Option<&'static str> {
 // -- Settings ------------------------------------------------------------------
 
 /// The settings page's switches: file name and label.
-const SETTINGS: [(&str, &str); 4] = [
+const SETTINGS: [(&str, &str); 7] = [
     ("trail", "Player trail"),
     ("markers", "Markers in the world"),
     ("death", "Waypoint on death"),
     ("players", "Other players on the map"),
+    ("lighting", "Day and night on the map"),
+    ("minimap", "Minimap"),
+    ("minimap_rotate", "Rotate the minimap"),
 ];
 
 /// The switches, all on until the player turns one off.
@@ -1356,6 +1846,14 @@ struct Settings {
     markers: bool,
     death: bool,
     players: bool,
+    /// The surface is dark at night, and lit blocks shine.
+    lighting: bool,
+    /// The minimap in the game, its corner (a place in `MINI_CORNERS`) and its size.
+    minimap: bool,
+    corner: u8,
+    size: u8,
+    /// The minimap turns with the player (the way they face is up), or north is up.
+    rotate: bool,
 }
 
 impl Default for Settings {
@@ -1365,13 +1863,18 @@ impl Default for Settings {
             markers: true,
             death: true,
             players: true,
+            lighting: true,
+            minimap: true,
+            corner: 0,
+            size: 1,
+            rotate: true,
         }
     }
 }
 
 impl Settings {
     fn get(&self, i: usize) -> bool {
-        [self.trail, self.markers, self.death, self.players]
+        [self.trail, self.markers, self.death, self.players, self.lighting, self.minimap, self.rotate]
             .get(i)
             .copied()
             .unwrap_or(false)
@@ -1383,6 +1886,9 @@ impl Settings {
             1 => self.markers = on,
             2 => self.death = on,
             3 => self.players = on,
+            4 => self.lighting = on,
+            5 => self.minimap = on,
+            6 => self.rotate = on,
             _ => {}
         }
     }
@@ -1395,8 +1901,27 @@ impl Settings {
                 out.set(i, value.trim() != "false");
             }
         }
+        let number = |key: &str, max: usize, default: u8| {
+            game.native_setting(ID, key)
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .map_or(default, |v| v.min(max) as u8)
+        };
+        out.corner = number("minimap_corner", MINI_CORNERS.len() - 1, out.corner);
+        out.size = number("minimap_size", MINI_SIZES.len() - 1, out.size);
         out
     }
+}
+
+/// How light the sky is at a time of day: 0 at midnight to `DAY` at noon, by the way the game
+/// moves the sun (its celestial angle), so dusk and dawn come when the sky darkens.
+fn sky_level(day_time: i64) -> u8 {
+    use std::f32::consts::{PI, TAU};
+    let t = day_time.rem_euclid(24000) as f32 / 24000.0;
+    let d = (t - 0.25).rem_euclid(1.0);
+    let e = 0.5 - (d * PI).cos() / 2.0;
+    let angle = d + (e - d) / 3.0;
+    let dark = (1.0 - ((angle * TAU).cos() * 2.0 + 0.2)).clamp(0.0, 1.0);
+    ((1.0 - dark) * f32::from(DAY)).round() as u8
 }
 
 // -- Hooks ---------------------------------------------------------------------
@@ -1429,7 +1954,19 @@ pub fn frame(game: &mut Game<'_>) {
             s.settings_loaded = true;
         });
     }
-    let key = world_key(game);
+    let key = {
+        let base = world_key(game);
+        let seed = game.remote.as_ref().map_or(0, |r| r.hashed_seed);
+        let known = with(|s| match &s.key_memo {
+            Some((b, sd, k)) if *b == base && *sd == seed => Some(k.clone()),
+            _ => None,
+        });
+        known.unwrap_or_else(|| {
+            let key = world_folder(base.clone(), seed);
+            with(|s| s.key_memo = Some((base, seed, key.clone())));
+            key
+        })
+    };
     let open = ours(game);
     let gui = game.native_client_state().map(|c| c.gui_size);
     let radius = (game.settings.render_distance as i32).clamp(2, 16);
@@ -1442,8 +1979,21 @@ pub fn frame(game: &mut Game<'_>) {
     let (bx, bz) = (player.x.floor() as i32, player.z.floor() as i32);
     let underground =
         player.dimension == "minecraft:the_nether" || game.world.light(bx, head, bz) >> 4 == 0;
+    // The Nether and the End have no day and night.
+    let sky = if player.dimension == "minecraft:the_nether" || player.dimension == "minecraft:the_end"
+    {
+        DAY
+    } else {
+        sky_level(game.world.day_time)
+    };
+    // The camera of the frame before, between ticks, else the player's place at the tick.
+    let mini_at = game
+        .locator_camera
+        .map_or((player.x, player.z, player.yaw), |(at, yaw, _, _)| (at[0], at[2], yaw));
     let upload = with(|s| {
         s.player = (player.x, player.y, player.z, player.yaw);
+        s.mini_at = mini_at;
+        s.sky = sky;
         if !dead {
             s.alive_at = (player.x, player.y, player.z);
         }
@@ -1483,13 +2033,32 @@ pub fn frame(game: &mut Game<'_>) {
             (true, 1) => FULL,
             (true, _) => s.top_y.map_or(slice, cave_layer),
         };
+        // The minimap's floor at the player's height, when they are under a roof or in a cave.
+        let live = if caves && s.settings.minimap {
+            // At every block of the player's height, a jump too.
+            s.live_anchor = player.y;
+            let turn = if s.settings.rotate { 1.42 } else { 1.0 };
+            let blocks = s.mini_size() / 2.0 * MINI_ZOOMS[s.mini_zoom.min(MINI_ZOOMS.len() - 1)] * turn;
+            let reach = ((blocks / 16.0).ceil() as i32 + 1).min(radius);
+            Some((head, reach))
+        } else {
+            s.live_anchor = f64::NAN;
+            None
+        };
         s.map.update(
             &game.world,
             game.res.facts(),
             center,
             radius,
-            SCAN_BUDGET,
+            if open {
+                SCAN_BUDGET_OPEN
+            } else if live.is_some() {
+                SCAN_BUDGET_LIVE
+            } else {
+                SCAN_BUDGET
+            },
             scan_layer,
+            live,
         );
         s.waiting = if open && s.view_layer == scan_layer.map_or(SURFACE, |c| c.0) {
             s.map
@@ -1503,6 +2072,7 @@ pub fn frame(game: &mut Game<'_>) {
         }
         if open {
             s.ease_zoom();
+            s.glide_step();
             s.compose()
         } else {
             None
@@ -1510,6 +2080,17 @@ pub fn frame(game: &mut Game<'_>) {
     });
     if let Some((w, h, rgba)) = upload {
         game.native_mod_image(w as u32, h as u32, &rgba);
+    }
+    // The minimap shares the image with the map screen: it draws its own when the screen is shut.
+    let mini = with(|s| {
+        if s.settings.minimap && !open && !dead {
+            s.mini_compose()
+        } else {
+            None
+        }
+    });
+    if let Some((size, rgba)) = mini {
+        game.native_mod_image(size as u32, size as u32, &rgba);
     }
     // A teleport the menu asked for: close the map, then the command.
     if let Some(command) = with(|s| s.pending.take()) {
@@ -1524,6 +2105,28 @@ pub fn frame(game: &mut Game<'_>) {
 pub fn key(game: &mut Game<'_>, key: &str, pressed: bool) {
     if !pressed || !game.native_on(ID) {
         return;
+    }
+    if game.native_playing() && game.native_window() && !ours(game) {
+        let name_of = |name: &str| {
+            let default = KEYS.iter().find(|k| k.0 == name).map_or("", |k| k.2);
+            game.native_mod_key(ID, name, default)
+        };
+        if key == name_of("minimap") {
+            let on = !with(|s| s.settings.minimap);
+            game.native_set_setting(ID, "minimap", if on { "true" } else { "false" });
+            with(|s| {
+                s.settings.minimap = on;
+                s.slot = 0;
+            });
+            return;
+        }
+        if key == name_of("minimap_zoom") {
+            with(|s| {
+                s.mini_zoom = (s.mini_zoom + 1) % MINI_ZOOMS.len();
+                s.map.invalidate();
+            });
+            return;
+        }
     }
     if key != game.native_mod_key(ID, KEY_NAME, DEFAULT_KEY) {
         return;
@@ -1558,6 +2161,9 @@ pub fn pressed(game: &Game<'_>, screen: &NativeScreenView<'_>, button: i32, canc
     with(|s| {
         let mouse = screen.mouse;
         s.mouse = mouse;
+        s.glide = (0.0, 0.0);
+        s.drag_vel = (0.0, 0.0);
+        s.drag_at = None;
         s.slider_drag = false;
         s.cave_slider_drag = false;
         s.ui_press = false;
@@ -1606,14 +2212,31 @@ pub fn pressed(game: &Game<'_>, screen: &NativeScreenView<'_>, button: i32, canc
                 s.list_focus = button == 0;
             } else {
                 s.list_focus = false;
-                if let Some(i) = s.list_row_at(mouse) {
-                    if button == 0 {
-                        let w = &s.waypoints[i];
-                        s.cx = f64::from(w.x) + 0.5;
-                        s.cz = f64::from(w.z) + 0.5;
-                        s.zoom_anchor = None;
-                    } else if button == 1 {
-                        open_menu(game, s, MenuKind::Waypoint(i), mouse);
+                let (export, import) = s.list_buttons();
+                if button == 0 && inside(export, mouse) {
+                    s.export_waypoints();
+                } else if button == 0 && inside(import, mouse) {
+                    s.import_waypoints();
+                } else {
+                    match s.list_row_at(mouse) {
+                        // A group's heading shows or hides all of its waypoints.
+                        Some(ListRow::Group(group)) => {
+                            if button == 0 && !group.is_empty() && !s.hidden_groups.remove(&group) {
+                                s.hidden_groups.insert(group);
+                            }
+                            s.wp_dirty = true;
+                        }
+                        Some(ListRow::Item(i)) => {
+                            if button == 0 {
+                                let w = &s.waypoints[i];
+                                s.cx = f64::from(w.x) + 0.5;
+                                s.cz = f64::from(w.z) + 0.5;
+                                s.zoom_anchor = None;
+                            } else if button == 1 {
+                                open_menu(game, s, MenuKind::Waypoint(i), mouse);
+                            }
+                        }
+                        None => {}
                     }
                 }
             }
@@ -1676,6 +2299,15 @@ pub fn released(game: &Game<'_>, canceled: &mut bool) {
             s.slider_drag = false;
             s.cave_slider_drag = false;
             s.ui_press = false;
+            // Let go while still moving: the map goes on a little.
+            let moving = s.drag_at.is_some_and(|t| t.elapsed() < Duration::from_millis(90));
+            let speed = s.drag_vel.0.hypot(s.drag_vel.1);
+            if moving && speed >= 60.0 && s.entering.is_none() {
+                s.glide = (s.drag_vel.0.clamp(-3000.0, 3000.0), s.drag_vel.1.clamp(-3000.0, 3000.0));
+                s.glide_at = Instant::now();
+            }
+            s.drag_at = None;
+            s.drag_vel = (0.0, 0.0);
         });
     }
 }
@@ -1703,6 +2335,16 @@ pub fn dragged(
             s.cx -= f64::from(delta[0]) * bpp;
             s.cz -= f64::from(delta[1]) * bpp;
             s.zoom_anchor = None;
+            s.glide = (0.0, 0.0);
+            let now = Instant::now();
+            if let Some(before) = s.drag_at {
+                let dt = now.duration_since(before).as_secs_f64();
+                if dt > 0.0005 {
+                    let (vx, vy) = (f64::from(delta[0]) / dt, f64::from(delta[1]) / dt);
+                    s.drag_vel = (s.drag_vel.0 * 0.5 + vx * 0.5, s.drag_vel.1 * 0.5 + vy * 0.5);
+                }
+            }
+            s.drag_at = Some(now);
         }
     });
 }
@@ -1818,6 +2460,24 @@ pub fn settings_click(game: &mut Game<'_>, mod_id: &str, button: usize) {
         return;
     }
     if button < 1000 {
+        // The two after the switches take the minimap's corner and size round.
+        if button == SETTINGS.len() || button == SETTINGS.len() + 1 {
+            let mut settings = with(|s| s.settings);
+            let (key, value) = if button == SETTINGS.len() {
+                settings.corner = (settings.corner + 1) % MINI_CORNERS.len() as u8;
+                ("minimap_corner", settings.corner)
+            } else {
+                settings.size = (settings.size + 1) % MINI_SIZES.len() as u8;
+                ("minimap_size", settings.size)
+            };
+            game.native_set_setting(ID, key, &value.to_string());
+            with(|s| {
+                s.settings = settings;
+                s.settings_loaded = true;
+                s.slot = 0;
+            });
+            return;
+        }
         // A switch of the settings page.
         let mut settings = with(|s| s.settings);
         if let Some((key, _)) = SETTINGS.get(button) {
@@ -1853,6 +2513,13 @@ pub fn settings_page(game: &mut Game<'_>, mod_id: &str, buttons: &mut Vec<String
         };
         buttons.push(format!("{name}: {state}"));
     }
+    let corner = MINI_CORNERS[usize::from(settings.corner).min(MINI_CORNERS.len() - 1)];
+    let size = MINI_SIZE_NAMES[usize::from(settings.size).min(MINI_SIZE_NAMES.len() - 1)];
+    let word = |text: &str| -> String {
+        if ru { ru_text(text).unwrap_or(text).to_owned() } else { text.to_owned() }
+    };
+    buttons.push(format!("{}: {}", word("Minimap corner"), word(corner)));
+    buttons.push(format!("{}: {}", word("Minimap size"), word(size)));
 }
 
 /// How the mod is listed in Options > Mods: title, description and keys, in the
@@ -2063,6 +2730,18 @@ fn marker(game: &Game<'_>, batch: &mut HudBatch, x: f32, y: f32, r: f32, rgb: u3
     };
     game.native_quad(batch, outline, 0xFF00_0000);
     game.native_quad(batch, fill, 0xFF00_0000 | rgb);
+}
+
+/// A waypoint in the world: a square of its colour with its first letter, its name and
+/// distance under it on a dark ground.
+fn waypoint_icon(game: &Game<'_>, batch: &mut HudBatch, x: f32, y: f32, w: &Waypoint, label: &str) {
+    game.native_fill(batch, [x - 7.0, y - 7.0, 14.0, 14.0], 0xC000_0000);
+    game.native_fill(batch, [x - 6.0, y - 6.0, 12.0, 12.0], 0xFF00_0000 | w.color);
+    let initial: String = w.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+    centered_text(game, batch, &initial, x, y - 3.5, 0xFFFFFF);
+    let lw = width_of(game, label);
+    game.native_fill(batch, [(x - lw / 2.0 - 3.0).round(), y + 9.0, lw + 6.0, 12.0], 0xA000_0000);
+    centered_text(game, batch, label, x, y + 11.5, 0xFFFFFF);
 }
 
 fn centered_text(game: &Game<'_>, batch: &mut HudBatch, text: &str, x: f32, y: f32, rgb: u32) {
@@ -2277,8 +2956,15 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
         }
 
         // Waypoints.
-        let hovered = if free { s.waypoint_at(mouse) } else { None };
-        for w in s.waypoints.iter().filter(|w| s.show_waypoints && w.dim == s.view_dim_id()) {
+        let over_panel = (s.cave_panel && inside(s.cave_rect(), mouse))
+            || (s.list_open && inside(s.list_rect(), mouse))
+            || mouse[1] >= gh - TOOL_H - 12.0;
+        let hovered = if free && !over_panel { s.waypoint_at(mouse) } else { None };
+        for w in s
+            .waypoints
+            .iter()
+            .filter(|w| s.show_waypoints && w.dim == s.view_dim_id() && s.group_visible(w))
+        {
             let (x, y) = s.to_screen(f64::from(w.x) + 0.5, f64::from(w.z) + 0.5);
             if x < -20.0 || y < -20.0 || x > gw + 20.0 || y > gh + 20.0 {
                 continue;
@@ -2399,6 +3085,7 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
             w2 = w2.max(width_of(game, text));
         }
         let rows = if loading.is_some() { 36.0 } else { 24.0 };
+        s.info_w = w2 + 14.0;
         let bottom = gh - TOOL_H - 12.0;
         panel(game, batch, [6.0, bottom - rows, w2 + 14.0, rows]);
         let top = bottom - rows + 3.0;
@@ -2436,8 +3123,8 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
         if s.list_open {
             let r = s.list_rect();
             panel(game, batch, r);
-            let items = s.list_items();
-            let title = format!("{} ({})", tr("Waypoints"), items.len());
+            let items = s.list_rows();
+            let title = format!("{} ({})", tr("Waypoints"), s.list_items().len());
             say(game, batch, &title, [r[0] + 8.0, r[1] + 4.0], TEXT, true);
             let sr = s.list_search_rect();
             field_box(game, batch, sr, s.list_focus);
@@ -2449,19 +3136,41 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
             };
             say(game, batch, &query, [sr[0] + 4.0, sr[1] + 4.0], if empty { MUTED } else { TEXT }, true);
             let top = r[1] + 36.0;
-            let height = r[3] - 38.0;
+            let height = r[3] - 38.0 - 20.0;
             let most = (items.len() as f32 * 14.0 - height).max(0.0);
             s.list_scroll = s.list_scroll.clamp(0.0, most);
             let (ox, oz) = if s.viewing_other() { (s.cx, s.cz) } else { (px, pz) };
-            for (k, &i) in items.iter().enumerate() {
+            for (k, row) in items.iter().enumerate() {
                 let y = top + k as f32 * 14.0 - s.list_scroll;
                 if y < top || y + 13.0 > top + height {
                     continue;
                 }
-                let w = &s.waypoints[i];
                 if free && inside([r[0], y, r[2], 13.0], mouse) {
                     game.native_fill(batch, [r[0] + 2.0, y, r[2] - 2.0, 13.0], HOT);
                 }
+                let i = match row {
+                    ListRow::Item(i) => *i,
+                    ListRow::Group(group) => {
+                        // A heading: a box that is filled when the group is shown.
+                        let hidden = s.hidden_groups.contains(group);
+                        let edge = if group.is_empty() { 0xFF30_3846 } else { 0xFF00_0000 | ACCENT };
+                        game.native_fill(batch, [r[0] + 8.0, y + 3.0, 7.0, 7.0], edge);
+                        if !hidden {
+                            game.native_fill(batch, [r[0] + 9.0, y + 4.0, 5.0, 5.0], 0xFF10_141C | if group.is_empty() { 0x20_2830 } else { ACCENT });
+                        } else {
+                            game.native_fill(batch, [r[0] + 9.0, y + 4.0, 5.0, 5.0], 0xFF10_141C);
+                        }
+                        let name = if group.is_empty() { tr("No group").into_owned() } else { group.clone() };
+                        let mut name = name;
+                        while width_of(game, &name) > r[2] - 30.0 && name.chars().count() > 1 {
+                            name.pop();
+                        }
+                        say(game, batch, &name, [r[0] + 19.0, y + 3.0], if hidden { MUTED } else { WARN }, true);
+                        continue;
+                    }
+                };
+                let w = &s.waypoints[i];
+                let dimmed = !s.group_visible(w);
                 game.native_fill(batch, [r[0] + 8.0, y + 3.0, 7.0, 7.0], 0xFF00_0000 | w.color);
                 let far = (f64::from(w.x) - ox).hypot(f64::from(w.z) - oz);
                 let far = if far >= 10_000.0 {
@@ -2474,8 +3183,14 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
                 while width_of(game, &name) > r[2] - 30.0 - fw && name.chars().count() > 1 {
                     name.pop();
                 }
-                say(game, batch, &name, [r[0] + 19.0, y + 3.0], TEXT, true);
+                say(game, batch, &name, [r[0] + 19.0, y + 3.0], if dimmed { MUTED } else { TEXT }, true);
                 say(game, batch, &far, [r[0] + r[2] - 6.0 - fw, y + 3.0], MUTED, true);
+            }
+            // Export and Import, under the rows.
+            let (export, import) = s.list_buttons();
+            for (rect, label) in [(export, "Export"), (import, "Import")] {
+                button(game, batch, rect, free && inside(rect, mouse), false, false);
+                centered_text(game, batch, label, rect[0] + rect[2] / 2.0, rect[1] + 3.0, TEXT);
             }
         }
 
@@ -2618,7 +3333,9 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
             game.native_fill(batch, [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], EDGE);
             game.native_fill(batch, r, 0xF010_141C);
             game.native_fill(batch, [r[0], r[1], r[2], 2.0], 0xFF00_0000 | ACCENT);
-            let head = if s.editing.is_some() {
+            let head = if s.editing_group {
+                tr("Waypoint group").into_owned()
+            } else if s.editing.is_some() {
                 "Rename waypoint".to_owned()
             } else {
                 if ru() {
@@ -2637,7 +3354,7 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
                 true,
             );
             // The colours: click one, or Tab for the next.
-            for (i, rect) in s.swatches().iter().enumerate() {
+            for (i, rect) in s.swatches().iter().enumerate().filter(|_| !s.editing_group) {
                 let c = COLORS[i];
                 let edge = if c == chosen {
                     0xFFFF_FFFF
@@ -2705,15 +3422,22 @@ pub fn hud(game: &Game<'_>, batch: &mut HudBatch) {
     if !game.native_on(ID) || !game.native_window() || !game.native_playing() {
         return;
     }
+    if !ours(game) {
+        with(|s| s.draw_minimap(game, batch));
+    }
     if !with(|s| s.settings.markers) {
         return;
     }
-    let Some(cam) = game.native_camera() else {
+    let Some(cam) = camera_of(game, batch.width, batch.height) else {
         return;
     };
     let (gw, gh) = (batch.width, batch.height);
     with(|s| {
-        for w in s.waypoints.iter().filter(|w| s.show_waypoints && w.dim == cam.dimension) {
+        for w in s
+            .waypoints
+            .iter()
+            .filter(|w| s.show_waypoints && w.dim == cam.dimension && s.group_visible(w))
+        {
             let rel = [
                 f64::from(w.x) + 0.5 - cam.position[0],
                 f64::from(w.y) + 1.0 - cam.position[1],
@@ -2733,11 +3457,58 @@ pub fn hud(game: &Game<'_>, batch: &mut HudBatch) {
                 continue;
             }
             let (x, y) = ((nx * 0.5 + 0.5) * gw, (0.5 - ny * 0.5) * gh);
-            marker(game, batch, x, y, 3.0, w.color, w.shape);
             let label = format!("{}  {}m", w.name, distance.round() as i64);
-            centered_text(game, batch, &label, x, y - 14.0, w.color);
+            waypoint_icon(game, batch, x, y, w, &label);
         }
     });
+}
+
+/// The camera the world is drawn from, as far as the waypoints need it: where it is, the view
+/// and projection matrices (column-major), the dimension.
+struct Cam {
+    position: [f64; 3],
+    view: [f32; 16],
+    projection: [f32; 16],
+    dimension: String,
+}
+
+/// The game hands the camera to mods only when it has any registered, and a native mod may be
+/// the only one: then it is worked out here as the game does it.
+fn camera_of(game: &Game<'_>, gw: f32, gh: f32) -> Option<Cam> {
+    if let Some(cam) = game.native_camera() {
+        return Some(Cam {
+            position: cam.position,
+            view: cam.view,
+            projection: cam.projection,
+            dimension: cam.dimension,
+        });
+    }
+    let dimension = game.native_player()?.dimension.to_string();
+    // The camera of the frame before (the game keeps it for the locator bar): between ticks,
+    // with the game's own turn of the view, as it bobs while walking and shakes when hurt.
+    if let Some((position, yaw, pitch, fov)) = game.locator_camera {
+        let partial = game.clock.camera_fraction() as f32;
+        let view = game.bob_matrix(partial)
+            * game.spinning_matrix(partial)
+            * horizon_client::camera::view_matrix(yaw, pitch);
+        return Some(Cam {
+            position,
+            view: view.to_cols_array(),
+            projection: glam::Mat4::perspective_rh(fov.to_radians(), gw / gh.max(1.0), 4096.0, 0.05)
+                .to_cols_array(),
+            dimension,
+        });
+    }
+    let state = game.native_client_state()?;
+    let position = state.eye_position?;
+    let fov = game.fov_degrees(state.world_partial_tick as f32, position);
+    Some(Cam {
+        position,
+        view: horizon_client::camera::view_matrix(state.yaw, state.pitch).to_cols_array(),
+        projection: glam::Mat4::perspective_rh(fov.to_radians(), gw / gh.max(1.0), 4096.0, 0.05)
+            .to_cols_array(),
+        dimension,
+    })
 }
 
 /// `m` (column-major, 4 x 4) times `v`.
@@ -2752,6 +3523,116 @@ fn mul(m: &[f32; 16], v: [f32; 4]) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waypoint_lines_come_from_this_mod_and_from_others() {
+        let own = parse_waypoint("Home\t10\t64\t-20\te04040\tminecraft:the_nether\t2\tBase", "x").unwrap();
+        assert_eq!((own.name.as_str(), own.x, own.y, own.z), ("Home", 10, 64, -20));
+        assert_eq!((own.dim.as_str(), own.shape, own.group.as_str()), ("minecraft:the_nether", 2, "Base"));
+        // The files of 0.5.0 had no group.
+        let old = parse_waypoint("Mine\t1\t2\t3\t60d060\tminecraft:overworld\t0", "x").unwrap();
+        assert_eq!(old.group, "");
+        let other = parse_waypoint("waypoint:Farm \u{a7}\u{a7} east:F:100:70:-200:12:false:0:Base:false:0:0:false", "minecraft:overworld").unwrap();
+        assert_eq!((other.name.as_str(), other.x, other.y, other.z), ("Farm : east", 100, 70, -200));
+        assert_eq!((other.dim.as_str(), other.group.as_str()), ("minecraft:overworld", "Base"));
+        assert!(COLORS.contains(&other.color));
+        let tilde = parse_waypoint("waypoint:A:A:5:~:7:3:false:0:gui.xaero_default:false:0:0:false", "d").unwrap();
+        assert_eq!((tilde.y, tilde.group.as_str()), (64, ""));
+        assert!(parse_waypoint("# a comment", "d").is_none());
+        assert!(parse_waypoint("", "d").is_none());
+    }
+
+    #[test]
+    fn a_waypoint_list_is_grouped_when_any_group_is_named() {
+        let mut s = State::new();
+        s.view_dim = None;
+        s.loaded = Some(("w".to_owned(), "minecraft:overworld".to_owned()));
+        let w = |name: &str, x: i32, group: &str| Waypoint {
+            name: name.to_owned(),
+            x,
+            y: 64,
+            z: 0,
+            color: 0xFFFFFF,
+            dim: "minecraft:overworld".to_owned(),
+            shape: 0,
+            group: group.to_owned(),
+        };
+        s.waypoints = vec![w("a", 5, ""), w("b", 1, "Base"), w("c", 9, "Base")];
+        let rows = s.list_rows();
+        let shape: Vec<String> = rows
+            .iter()
+            .map(|r| match r {
+                ListRow::Group(g) => format!("[{g}]"),
+                ListRow::Item(i) => s.waypoints[*i].name.clone(),
+            })
+            .collect();
+        assert_eq!(shape, ["[Base]", "b", "c", "[]", "a"]);
+        s.waypoints[1].group.clear();
+        s.waypoints[2].group.clear();
+        assert_eq!(s.list_rows().len(), 3);
+        s.hidden_groups.insert("Nope".to_owned());
+        assert!(s.group_visible(&s.waypoints[0]));
+    }
+
+    #[test]
+    fn a_point_ahead_projects_to_the_middle_of_the_screen() {
+        let view = horizon_client::camera::view_matrix(0.0, 0.0).to_cols_array();
+        let proj = glam::Mat4::perspective_rh(70f32.to_radians(), 16.0 / 9.0, 4096.0, 0.05)
+            .to_cols_array();
+        let project = |p: [f32; 3]| mul(&proj, mul(&view, [p[0], p[1], p[2], 1.0]));
+        // Yaw 0 faces south (+z): ahead is the middle, behind is not in front, and west (-x)
+        // is on the right.
+        let ahead = project([0.0, 0.0, 10.0]);
+        assert!(ahead[3] > 0.0);
+        assert!((ahead[0] / ahead[3]).abs() < 1e-3 && (ahead[1] / ahead[3]).abs() < 1e-3);
+        assert!(project([0.0, 0.0, -10.0])[3] < 0.0);
+        let west = project([-5.0, 0.0, 10.0]);
+        assert!(west[0] / west[3] > 0.1, "{west:?}");
+        let up = project([0.0, 3.0, 10.0]);
+        assert!(up[1] / up[3] > 0.1, "{up:?}");
+    }
+
+    #[test]
+    fn a_let_go_map_glides_and_stops() {
+        let mut s = State::new();
+        s.cx = 0.0;
+        s.bpp = 1.0;
+        s.glide = (-600.0, 0.0);
+        let mut moved = 0.0;
+        for _ in 0..200 {
+            s.glide_at = Instant::now() - Duration::from_millis(16);
+            let before = s.cx;
+            s.glide_step();
+            assert!(s.cx >= before, "the map went back");
+            moved = s.cx;
+        }
+        // Dragged to the left, it goes on to the right of the world, slowing down to a stop.
+        assert!(moved > 50.0 && moved < 600.0, "{moved}");
+        assert_eq!(s.glide, (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_friends_tunnel_is_this_computer() {
+        for a in ["127.0.0.1:25580", "localhost:3000", "LOCALHOST", "[::1]:25565", "127.1.2.3"] {
+            assert!(is_loopback(a), "{a}");
+        }
+        for a in ["play.example.com:25565", "192.168.1.20:25580", "10.0.0.2", "[2001:db8::1]:1"] {
+            assert!(!is_loopback(a), "{a}");
+        }
+    }
+
+    #[test]
+    fn the_sky_is_light_by_day_and_dark_at_night() {
+        assert_eq!(sky_level(6000), DAY);
+        assert_eq!(sky_level(18000), 0);
+        assert_eq!(sky_level(6000 + 24000 * 3), DAY);
+        let dawn = sky_level(0);
+        assert!(dawn > 0 && dawn < DAY, "{dawn}");
+        // It gets lighter through the morning and darker through the evening.
+        assert!(sky_level(1000) >= dawn);
+        assert!(sky_level(12500) > sky_level(13500));
+        assert!(sky_level(13500) >= sky_level(18000));
+    }
 
     #[test]
     fn matrices_multiply_column_major() {
