@@ -5,6 +5,8 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
 
 > [Русская версия ниже](#world-map-для-horizon)
 
+If you like the mod, you can [support its development on Donatello](https://donatello.to/luminaaa).
+
 ## Screenshots
 
 ![The map by day: waypoints, the biome and the Nether coordinates under the pointer](screenshots/map.png)
@@ -120,6 +122,11 @@ Hooks: a module added to the minimap's file (`core.rs`) reuses its column scan a
 colours to keep the explored map; a module in `game.rs` (`runtime.rs`) holds the screen, the
 waypoints and the markers; the mod screen (`native_mod_screen_open`) and image
 (`native_mod_image`) of Horizon draw it.
+
+## Support
+
+World Map is free and open source. If it is useful to you, you can support its development: [https://donatello.to/luminaaa](https://donatello.to/luminaaa). Thank you!
+
 ## Credits and licence
 
 MIT, see [LICENSE](LICENSE). Built on [Horizon](https://github.com/horizon-rust/horizon) (MIT)
@@ -130,6 +137,8 @@ other map mod is used here; the interface and the file formats are this mod's ow
 ---
 
 # World Map для Horizon
+
+Если мод вам нравится, можно [поддержать разработку на Donatello](https://donatello.to/luminaaa).
 
 Полноэкранная карта, которая рисуется сама по мере исследования, для
 [Horizon](https://playhorizon.dev) (Minecraft Java Edition 26.3 на Rust). Нативный мод.
@@ -188,3 +197,7 @@ other map mod is used here; the interface and the file formats are this mod's ow
 Horizon (MIT) и horizon-mixins (MIT) и не связан с Mojang, Microsoft и авторами других
 карт. Кода, текстур и текстов других модов карты здесь нет: интерфейс и форматы файлов
 свои.
+
+## Поддержать
+
+World Map бесплатный и с открытым кодом. Если он вам полезен, можно поддержать разработку: [https://donatello.to/luminaaa](https://donatello.to/luminaaa). Спасибо!

@@ -16,6 +16,8 @@ Open it with **M**. Keys are in Options > Mods > World Map, all rebindable.
 
 **What it does and doesn't do:** it reads the chunks the game has loaded around you and the game's own state, draws on its own screen, and keeps files in `config/worldmap/` (the explored chunks and the waypoints). It sends nothing to any server except the chat line you choose to share.
 
+**Support the author:** [donatello.to/luminaaa](https://donatello.to/luminaaa)
+
 **Native mod, pinned** to Horizon Nightly `fdc87ae` (Minecraft 26.3): it reuses the minimap's colour scan, so it builds on that revision.
 """
 authors = ["Px228-Da-Da"]
