@@ -23,6 +23,8 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
 
 ![Sharing a waypoint asks first](screenshots/share.png)
 
+![/wp commands in the chat, a shared waypoint with [Add], the minimap and the waypoints in the world](screenshots/commands.jpg)
+
 ![Cave map settings](screenshots/caves.png)
 
 ## Features
