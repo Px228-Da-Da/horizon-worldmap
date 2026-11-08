@@ -4272,6 +4272,23 @@ pub fn commands(game: &Game<'_>, commands: &mut Vec<&'static str>) {
     }
 }
 
+/// The chat box's command tree with `/wp`'s words under it (add, del, ...), so that they are
+/// completed and listed as the game's own commands' are. What is typed after them goes to
+/// the mod as it was.
+pub fn extend_tree(mut tree: horizon_client::command::Dispatcher) -> horizon_client::command::Dispatcher {
+    use horizon_client::command::{ArgType, MOD_COMMAND};
+    let Some(wp) = tree.find("wp") else {
+        return tree;
+    };
+    for word in ["add", "del", "rename", "list", "share", "clear", "help"] {
+        let node = tree.literal(wp, word);
+        tree.executes(node, MOD_COMMAND);
+        let args = tree.argument(node, "args", ArgType::Greedy);
+        tree.executes(args, MOD_COMMAND);
+    }
+    tree
+}
+
 /// The mod's own command: the green [Add] of a shared place.
 pub fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
     if !game.native_on(ID) {
@@ -4442,6 +4459,17 @@ mod tests {
         // The files of 0.6 have no such field: shown.
         let old = parse_waypoint("A\t1\t2\t3\tffffff\tminecraft:overworld\t0\tG", "x").unwrap();
         assert!(!old.hidden);
+    }
+
+    #[test]
+    fn the_chat_tree_gets_wps_words() {
+        let base = horizon_client::command::vanilla::game_dispatcher().with_mod_commands(["wp"]);
+        let tree = extend_tree(base.clone());
+        let wp = tree.find("wp").expect("wp is in the tree");
+        // The words are children of it, and the tree without wp is left as it was.
+        assert!(tree.find("waypoint").is_some());
+        assert_eq!(extend_tree(horizon_client::command::vanilla::game_dispatcher().clone()).find("wp").is_none(), true);
+        let _ = wp;
     }
 
     #[test]

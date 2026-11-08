@@ -66,6 +66,16 @@ bindings = [
   { name = "commands", ty = "&mut Vec<&'static str>", value = "&mut *commands" },
 ]
 
+# /wp's words in the chat box's command tree, so that add, del, ... are completed.
+[[injection]]
+id = "chat-tree"
+kind = "RETURN"
+target = "horizon_client::game::chat::Game<'_>::chat_tree_for"
+helper = "chattree.rs"
+bindings = [
+  { name = "value", ty = "horizon_client::command::Dispatcher", value = "$value" },
+]
+
 [[injection]]
 id = "command"
 kind = "HEAD"
