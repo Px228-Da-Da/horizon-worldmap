@@ -5,7 +5,10 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
 
 > [Русская версия ниже](#world-map-для-horizon)
 
-If you like the mod, you can [support its development on Donatello](https://donatello.to/luminaaa).
+<p align="center">
+  <b>Like the mod? It is free and made by one person. A donation keeps the updates coming.</b><br><br>
+  <a href="https://donatello.to/luminaaa"><img alt="Support the author" src="https://img.shields.io/badge/Support%20the%20author-Donatello-ff5e5b?style=for-the-badge&logo=githubsponsors&logoColor=white"></a>
+</p>
 
 ## Screenshots
 
@@ -125,7 +128,10 @@ waypoints and the markers; the mod screen (`native_mod_screen_open`) and image
 
 ## Support
 
-World Map is free and open source. If it is useful to you, you can support its development: [https://donatello.to/luminaaa](https://donatello.to/luminaaa). Thank you!
+<p align="center">
+  World Map is free and open source. If it is useful to you, a donation helps a lot. Thank you!<br><br>
+  <a href="https://donatello.to/luminaaa"><img alt="Support the author" src="https://img.shields.io/badge/Support%20the%20author-Donatello-ff5e5b?style=for-the-badge&logo=githubsponsors&logoColor=white"></a>
+</p>
 
 ## Credits and licence
 
@@ -138,7 +144,10 @@ other map mod is used here; the interface and the file formats are this mod's ow
 
 # World Map для Horizon
 
-Если мод вам нравится, можно [поддержать разработку на Donatello](https://donatello.to/luminaaa).
+<p align="center">
+  <b>Нравится мод? Он бесплатный, его делает один человек. Донат помогает выпускать обновления.</b><br><br>
+  <a href="https://donatello.to/luminaaa"><img alt="Поддержать автора" src="https://img.shields.io/badge/Поддержать%20автора-Donatello-ff5e5b?style=for-the-badge&logo=githubsponsors&logoColor=white"></a>
+</p>
 
 Полноэкранная карта, которая рисуется сама по мере исследования, для
 [Horizon](https://playhorizon.dev) (Minecraft Java Edition 26.3 на Rust). Нативный мод.
@@ -200,4 +209,7 @@ Horizon (MIT) и horizon-mixins (MIT) и не связан с Mojang, Microsoft 
 
 ## Поддержать
 
-World Map бесплатный и с открытым кодом. Если он вам полезен, можно поддержать разработку: [https://donatello.to/luminaaa](https://donatello.to/luminaaa). Спасибо!
+<p align="center">
+  World Map бесплатный и с открытым кодом. Если он вам полезен, донат очень поможет. Спасибо!<br><br>
+  <a href="https://donatello.to/luminaaa"><img alt="Поддержать автора" src="https://img.shields.io/badge/Поддержать%20автора-Donatello-ff5e5b?style=for-the-badge&logo=githubsponsors&logoColor=white"></a>
+</p>
