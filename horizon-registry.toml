@@ -1,19 +1,20 @@
 name = "World Map"
 summary = "A full screen map of everything you have explored, kept between visits: cave layers, waypoints, teleport and PNG export."
 description = """
-A full screen map that writes itself as you explore, for Horizon.
+A full screen map that writes itself as you explore, for Horizon, with a minimap in the game.
 
-- **Self-writing map.** The terrain you have seen stays on the map after you leave, per world, dimension and cave layer, in the vanilla map colours.
-- **Smooth.** Drag to move, scroll to zoom towards the pointer; far zoom blurs instead of flickering.
-- **Cave layers.** Under a roof, in a cave or in the Nether the map shows the floor round you; layered (a map for each 16 blocks of height) or full, with a Top Y slider from -64 to 319.
-- **Waypoints.** Right-click for a menu: add, rename, 16 colours, three shapes, teleport (/tp), delete. Waypoints show in the world with their name and distance, and a waypoint is made where you die.
-- **Dimensions and a waypoint list.** One button shows the Overworld, the Nether or the End from any of them; a list of waypoints with search, nearest first.
-- **Also:** biome under the pointer, other players, go to coordinates, chunk grid, your trail, export the whole map as a PNG, a Russian interface.
-- **Keys.** Keys in Options > Mods > World Map, all rebindable.
+- **Self-writing map.** The terrain you have seen stays on the map after you leave, per world, dimension and cave layer, in the vanilla map colours, by day and by night (glowing blocks stay lit).
+- **Smooth.** Drag with a glide, scroll to zoom towards the pointer; no flicker when zooming, light on big maps.
+- **Minimap** that can turn with you, with the compass letters, waypoints and other players, and the floor at your head height in caves.
+- **Cave layers.** Under a roof, in a cave or in the Nether the map shows the floor round you; layered or full, with a Top Y slider.
+- **Waypoints.** Right-click menu with hotkeys: add, rename, 16 colours, shapes, groups, hide, teleport, share, delete; markers in the world with name and distance; import and export (also Xaero's format); a waypoint where you die.
+- **Share a waypoint** with a friend through the chat (a green [Add] they click), or with `/wp share <number> <player>` as a private message.
+- **`/wp` commands:** add, del, rename, list, clear, share.
+- **Also:** dimensions button, waypoint list with search, biome under the pointer, go to coordinates, chunk grid, PNG export, Russian interface.
 
-Open it with **M**. Keys: B new waypoint, C cave settings, G chunk grid, H hide waypoints, J go to coordinates, Space centre on you, L waypoint list.
+Open it with **M**. Keys are in Options > Mods > World Map, all rebindable.
 
-**What it does and doesn't do:** it reads the chunks the game has loaded around you and the game's own state, draws on its own screen, and keeps files in `config/worldmap/` (the explored chunks and a waypoints file for each world). It sends `/tp` in chat when you choose Teleport. It makes no network connection and needs no other mod.
+**What it does and doesn't do:** it reads the chunks the game has loaded around you and the game's own state, draws on its own screen, and keeps files in `config/worldmap/` (the explored chunks and the waypoints). It sends nothing to any server except the chat line you choose to share.
 
 **Native mod, pinned** to Horizon Nightly `2ebf00a` (Minecraft 26.3): it reuses the minimap's colour scan, so it builds on that revision.
 """
