@@ -4265,6 +4265,13 @@ fn dimension_phrase(dim: &str) -> String {
     }
 }
 
+/// The chat commands the mod owns: the chat box colours and completes `/wp` like the game's own.
+pub fn commands(game: &Game<'_>, commands: &mut Vec<&'static str>) {
+    if game.native_on(ID) && !commands.contains(&"wp") {
+        commands.push("wp");
+    }
+}
+
 /// The mod's own command: the green [Add] of a shared place.
 pub fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
     if !game.native_on(ID) {

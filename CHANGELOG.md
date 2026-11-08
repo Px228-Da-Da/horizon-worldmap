@@ -6,7 +6,8 @@
   never stack), `/wp del [name or number]` (nearest when none), `/wp rename <number> <name>`,
   `/wp list`, `/wp clear confirm`, and `/wp share <number> <player>`, which sends the place as a
   private message (only that player reads it, and it works on every server) or `/wp share <number> all`
-  for the whole chat. A player who has the mod gets the same green [Add].
+  for the whole chat. A player who has the mod gets the same green [Add]. The chat box knows `/wp`
+  (colour and completion).
 - **For Horizon Nightly `2ebf00a`** (2026-11-07). The mod's keys are now on its own page, Options > Mods
   > World Map, as the game lists the keys of a native mod (the newer mod tool no longer lets a mod add
   rows to the Key Binds screen).

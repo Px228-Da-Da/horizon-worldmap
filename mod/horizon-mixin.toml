@@ -55,6 +55,17 @@ bindings = [
   { name = "pressed", ty = "bool", value = "pressed" },
 ]
 
+# The names of the mod's chat commands, so the chat box knows /wp (colour, completion).
+[[injection]]
+id = "commands"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_commands"
+helper = "commands.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "commands", ty = "&mut Vec<&'static str>", value = "&mut *commands" },
+]
+
 [[injection]]
 id = "command"
 kind = "HEAD"
