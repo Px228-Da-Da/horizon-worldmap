@@ -10,7 +10,7 @@ import pathlib
 import re
 import zipfile
 
-HORIZON = "66f3981f522b24c250b21523a70080965b940424"  # Horizon Nightly 2026-11-05
+HORIZON = "2ebf00a0281c592f79191e76fce0e7d522c6f425"  # Horizon Nightly 2026-11-07
 MIXINS = "5a64af938ec86b00d53d16a408aabc0038fb3e57"
 HOOKS = 404  # the highest native hook point the mod uses (native_send_chat, API 404)
 

@@ -17,6 +17,12 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
 
 ![The waypoint list, with groups, Export and Import](screenshots/waypoints.png)
 
+![Pointing at a waypoint: its name, place, distance, group and hotkeys](screenshots/pointer.png)
+
+![The menu of a waypoint, with its hotkeys](screenshots/menu.png)
+
+![Sharing a waypoint asks first](screenshots/share.png)
+
 ![Cave map settings](screenshots/caves.png)
 
 ## Features
@@ -42,6 +48,12 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
   floor at your height. Other players are dots on it, bright at your height and dim above
   or below it. Its corner and size are in Options > Mods; `N` shows or hides it,
   `Z` changes its scale. Waypoints in the world are a square of their colour with a letter.
+- **Share a place** with a friend: *Share* in a waypoint's menu asks if you really want to share it with
+  everyone in the chat; a friend who has the mod sees `Name shared a waypoint called "Home" from
+  overworld! [Add]` and a click puts it on their map (others just read the place). The chat also says
+  `[Map] Waypoint ... set / removed / added`. The menu shows its hotkeys (E, T, H, DEL: rebindable).
+- **`/wp` commands:** `/wp add [name]`, `del [name or number]`, `rename <number> <name>`, `list`, `clear confirm`,
+  and `share <number> <player>` (a private message: only that player reads it, on any server) or `share <number> all`.
 - **Waypoint list** with search, nearest first, and **groups**: give a waypoint a group in
   its menu, then click the group's heading in the list to hide or show all of them.
   **Export** and **Import** (the list's buttons) write and read `exports/waypoints.txt` and
@@ -53,7 +65,7 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
   whole map exports as a PNG. Switches for the trail, the in-world markers, the death waypoint,
   other players and day and night are on the mod's page in Options > Mods.
 - **Russian** interface when the game is in Russian.
-- **Keys** are in Options > Controls > Key Binds, under *World Map*, with Reset.
+- **Keys** are in Options > Mods > World Map (rebindable).
 
 ## Keys
 
@@ -81,7 +93,7 @@ Use the launcher: *Add from GitHub* with this repository's link (or, once it is 
 then **Horizon**, search *World Map*). Native mods run with your rights: the launcher asks you to trust it and
 builds Horizon with the mod (a few minutes the first time).
 
-Made for Horizon Nightly `66f3981f522b24c250b21523a70080965b940424` (Minecraft 26.3). On
+Made for Horizon Nightly `2ebf00a0281c592f79191e76fce0e7d522c6f425` (Minecraft 26.3). On
 another revision the launcher offers *Build anyway*; it may not build there.
 
 ## Files
@@ -105,9 +117,7 @@ and install the `.hnmod`, or `horizon-launcher native-build mod --instance <name
 Hooks: a module added to the minimap's file (`core.rs`) reuses its column scan and map
 colours to keep the explored map; a module in `game.rs` (`runtime.rs`) holds the screen, the
 waypoints and the markers; the mod screen (`native_mod_screen_open`) and image
-(`native_mod_image`) of Horizon draw it. `keybinds.rs`, `keyclamp.rs`, `keyenter.rs` and
-`keystate.rs` add the mod's rows to the Key Binds screen.
-
+(`native_mod_image`) of Horizon draw it.
 ## Credits and licence
 
 MIT, see [LICENSE](LICENSE). Built on [Horizon](https://github.com/horizon-rust/horizon) (MIT)
@@ -144,6 +154,10 @@ other map mod is used here; the interface and the file formats are this mod's ow
   высоте. Другие игроки это точки: яркие на вашей высоте, тусклые выше и ниже. Угол и размер
   в Настройки > Моды; `N` показывает и прячет её, `Z` меняет масштаб.
   Метки в мире это квадрат цвета метки с буквой.
+- **Поделиться местом** с другом: *Поделиться* в меню метки спрашивает, точно ли отправить её всем в
+  чат; у друга с модом появляется `Ник поделился меткой «Home» из Верхнего мира! [Добавить]`, клик
+  ставит метку на его карту (у остальных это просто текст с координатами). Чат сообщает `[Map] Метка
+  ... поставлена / удалена / добавлена`. В меню показаны горячие клавиши (E, T, H, DEL: меняются).
 - **Список меток** с поиском, ближайшие первыми, и **группы**: задайте метке группу в её
   меню, затем нажмите на заголовок группы в списке, чтобы скрыть или показать их все.
   Кнопки **Export** и **Import** пишут и читают `exports/waypoints.txt` и `exports/import.txt`
@@ -162,7 +176,7 @@ other map mod is used here; the interface and the file formats are this mod's ow
 Моды, затем **Horizon**, поиск *World Map*). Нативные моды работают с вашими правами: лаунчер просит довериться моду и
 собирает Horizon вместе с ним (в первый раз несколько минут).
 
-Мод сделан для Horizon Nightly `66f3981f522b24c250b21523a70080965b940424` (Minecraft 26.3).
+Мод сделан для Horizon Nightly `2ebf00a0281c592f79191e76fce0e7d522c6f425` (Minecraft 26.3).
 На другой версии лаунчер предложит *Build anyway*, но сборка может не пройти.
 
 ## Файлы и лицензия

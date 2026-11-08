@@ -9,13 +9,13 @@ A full screen map that writes itself as you explore, for Horizon.
 - **Waypoints.** Right-click for a menu: add, rename, 16 colours, three shapes, teleport (/tp), delete. Waypoints show in the world with their name and distance, and a waypoint is made where you die.
 - **Dimensions and a waypoint list.** One button shows the Overworld, the Nether or the End from any of them; a list of waypoints with search, nearest first.
 - **Also:** biome under the pointer, other players, go to coordinates, chunk grid, your trail, export the whole map as a PNG, a Russian interface.
-- **Keys.** A World Map section in Options > Controls > Key Binds (with Reset), ten keys, all rebindable.
+- **Keys.** Keys in Options > Mods > World Map, all rebindable.
 
 Open it with **M**. Keys: B new waypoint, C cave settings, G chunk grid, H hide waypoints, J go to coordinates, Space centre on you, L waypoint list.
 
 **What it does and doesn't do:** it reads the chunks the game has loaded around you and the game's own state, draws on its own screen, and keeps files in `config/worldmap/` (the explored chunks and a waypoints file for each world). It sends `/tp` in chat when you choose Teleport. It makes no network connection and needs no other mod.
 
-**Native mod, pinned** to Horizon Nightly `66f3981` (Minecraft 26.3): it adds rows to the game's Key Binds screen and reuses the minimap's colour scan, so it builds on that revision.
+**Native mod, pinned** to Horizon Nightly `2ebf00a` (Minecraft 26.3): it reuses the minimap's colour scan, so it builds on that revision.
 """
 authors = ["Px228-Da-Da"]
 license = "MIT"

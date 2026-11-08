@@ -9,6 +9,7 @@ use horizon_client::{
     hud::{HudBatch, MOD_IMAGE_SPRITE},
     minimap::worldmap_core::{DAY, FULL, LIVE, SURFACE, WorldMap, cave_layer, layer_top},
     mod_api::NativeScreenView,
+    text::{ClickEvent, Style, Text},
 };
 use std::{
     borrow::Cow,
@@ -21,14 +22,14 @@ use std::{
 /// The mod's id (its settings and keys), name and version.
 pub const ID: &str = "worldmap";
 pub const NAME: &str = "World Map";
-pub const VERSION: &str = "0.6.0";
+pub const VERSION: &str = "0.7.0";
 pub const DESCRIPTION: &str = "A full screen map of everything you have explored, kept between visits: drag to move, scroll to zoom, right-click for a menu (teleport, waypoints, PNG export). Waypoints show in the world too.";
 pub const KEY_NAME: &str = "open";
 pub const DEFAULT_KEY: &str = "key.keyboard.m";
 
 /// The mod's keys, as Options lists them: name, label and the default key. The
 /// player's choices are kept by the game (`native_mod_key`).
-pub const KEYS: [(&str, &str, &str); 12] = [
+pub const KEYS: [(&str, &str, &str); 16] = [
     ("open", "Open World Map", "key.keyboard.m"),
     ("waypoint", "New Waypoint", "key.keyboard.b"),
     ("caves", "Cave Mode Settings", "key.keyboard.c"),
@@ -41,15 +42,24 @@ pub const KEYS: [(&str, &str, &str); 12] = [
     ("list", "Waypoint List", "key.keyboard.l"),
     ("minimap", "Toggle Minimap", "key.keyboard.n"),
     ("minimap_zoom", "Minimap Zoom", "key.keyboard.z"),
+    // In the menu of a waypoint (and on the one under the pointer).
+    ("wp_edit", "Edit Waypoint", "key.keyboard.e"),
+    ("wp_teleport", "Teleport to Waypoint", "key.keyboard.t"),
+    ("wp_hide", "Disable Waypoint", "key.keyboard.h"),
+    ("wp_delete", "Delete Waypoint", "key.keyboard.delete"),
 ];
 
 /// CPU time the scan may take per frame.
-const SCAN_BUDGET: Duration = Duration::from_micros(1500);
+const SCAN_BUDGET: Duration = Duration::from_micros(800);
 /// The same while the map is open: the player is looking at it, so it may take more.
-const SCAN_BUDGET_OPEN: Duration = Duration::from_micros(6000);
+const SCAN_BUDGET_OPEN: Duration = Duration::from_micros(3000);
 /// And while the minimap is cut at the player's height, which changes with every jump.
-const SCAN_BUDGET_LIVE: Duration = Duration::from_micros(4000);
-const SAVE_EVERY: Duration = Duration::from_secs(20);
+const SCAN_BUDGET_LIVE: Duration = Duration::from_micros(2500);
+/// A region is written this often while some are waiting (a thread writes it), the rest at the
+/// next time, so exploring fast does not write everything at once.
+/// CPU time the files of a map may take in a frame.
+const LOAD_BUDGET: Duration = Duration::from_millis(3);
+const SAVE_EVERY: Duration = Duration::from_secs(2);
 const ZOOM_MIN: f32 = 0.25;
 const ZOOM_MAX: f32 = 64.0;
 /// Waypoint colours, 0xRRGGBB, in the order new ones take.
@@ -151,6 +161,8 @@ impl MenuKind {
                 "Change color",
                 "Change shape",
                 "Group...",
+                "Hide / show",
+                "Share",
                 "Delete",
             ],
             Self::Ground { .. } => &["Teleport here", "New waypoint here", "Export PNG"],
@@ -219,6 +231,7 @@ fn parse_waypoint(line: &str, dim: &str) -> Option<Waypoint> {
             dim: dim.to_owned(),
             shape: 0,
             group,
+            hidden: false,
         });
     }
     let f: Vec<&str> = line.split('\t').collect();
@@ -243,6 +256,7 @@ fn parse_waypoint(line: &str, dim: &str) -> Option<Waypoint> {
         dim: f[5].to_owned(),
         shape: shape % SHAPES as u8,
         group: f.get(7).map(|g| (*g).to_owned()).unwrap_or_default(),
+        hidden: f.get(8) == Some(&"1"),
     })
 }
 
@@ -256,6 +270,8 @@ struct Waypoint {
     shape: u8,
     /// The group it is in, "" for none: a group can be hidden together.
     group: String,
+    /// Hidden by itself (the menu's Disable).
+    hidden: bool,
 }
 
 struct State {
@@ -360,6 +376,8 @@ struct State {
     /// The groups whose waypoints are hidden, and whether the name box holds a group.
     hidden_groups: std::collections::HashSet<String>,
     editing_group: bool,
+    /// The waypoint the player is asked to confirm sharing.
+    confirm_share: Option<usize>,
     goto: Option<String>,
     alive_at: (f64, f64, f64),
     was_dead: bool,
@@ -369,6 +387,20 @@ struct State {
     waiting: Vec<(i32, i32)>,
     born: Instant,
     last_save: Instant,
+    /// The other players the game knows, now and then (copying every creature each frame costs):
+    /// name and place, when it was made, and counters that let some work wait for a few frames.
+    players: Vec<(String, [f64; 3])>,
+    players_at: Instant,
+    scan_tick: u32,
+    key_tick: u32,
+    /// Lines for the chat, said in the next frame.
+    notes: Vec<String>,
+    /// What a pixel of the map's image costs to draw (ms, smoothed), and how much coarser than
+    /// the screen the image is drawn so that a slow computer is not held up by it (1: not).
+    px_cost: f32,
+    quality: f32,
+    /// A map's files are being read, and the line in the log about it is still to be written.
+    log_read: bool,
 }
 
 impl State {
@@ -432,6 +464,7 @@ impl State {
             show_waypoints: true,
             hidden_groups: std::collections::HashSet::new(),
             editing_group: false,
+            confirm_share: None,
             goto: None,
             alive_at: (0.0, 64.0, 0.0),
             was_dead: false,
@@ -439,13 +472,220 @@ impl State {
             waiting: Vec::new(),
             born: Instant::now(),
             last_save: Instant::now(),
+            players: Vec::new(),
+            players_at: Instant::now(),
+            scan_tick: 0,
+            key_tick: 0,
+            notes: Vec::new(),
+            px_cost: 0.0,
+            quality: 1.0,
+            log_read: false,
+        }
+    }
+
+    /// Something to say in the chat.
+    fn note(&mut self, line: String) {
+        if self.notes.len() < 8 {
+            self.notes.push(line);
+        }
+    }
+
+    /// A shared place's waypoint, added: the line to say about it.
+    fn add_shared(&mut self, payload: &str) -> String {
+        let Some(shared) = parse_payload(payload) else {
+            return pick("That place is not valid", "Это место не распознано");
+        };
+        if self.waypoints_of.is_none() {
+            return pick("Open a world first", "Сначала зайдите в мир");
+        }
+        let known = self.waypoints.iter().any(|w| {
+            w.name == shared.name && w.x == shared.x && w.y == shared.y && w.z == shared.z && w.dim == shared.dim
+        });
+        if known {
+            return pick(format!("You already have {}", shared.name), format!("Метка {} у вас уже есть", shared.name));
+        }
+        if self.waypoints.len() >= 2000 {
+            return pick("Too many waypoints", "Слишком много меток");
+        }
+        let color = COLORS[self.waypoints.len() % COLORS.len()];
+        let line = pick(
+            format!("Waypoint {} added at {} {} {}", shared.name, shared.x, shared.y, shared.z),
+            format!("Метка {} добавлена: {} {} {}", shared.name, shared.x, shared.y, shared.z),
+        );
+        self.waypoints.push(Waypoint {
+            name: shared.name,
+            x: shared.x,
+            y: shared.y,
+            z: shared.z,
+            color,
+            dim: shared.dim,
+            shape: 0,
+            group: String::new(),
+            hidden: false,
+        });
+        self.wp_dirty = true;
+        line
+    }
+
+    /// The waypoint a command means: its number in the list of this dimension, or its name.
+    fn find_waypoint(&self, mine: &[usize], what: &str) -> Option<usize> {
+        if let Ok(n) = what.parse::<usize>() {
+            return mine.get(n.checked_sub(1)?).copied();
+        }
+        mine.iter().copied().find(|&i| self.waypoints[i].name.eq_ignore_ascii_case(what))
+    }
+
+    /// `/wp ...`: add, del, rename, list, share and clear, from the chat. The answer, line by
+    /// line; a share leaves what is to be said in `pending`.
+    fn wp_command(&mut self, args: &str) -> Vec<String> {
+        let (verb, rest) = match args.trim().split_once(char::is_whitespace) {
+            Some((v, r)) => (v.to_lowercase(), r.trim()),
+            None => (args.trim().to_lowercase(), ""),
+        };
+        let help = || {
+            vec![
+                pick(
+                    "/wp add [name] | del [name or number] | rename <number> <name> | list | share <number> <player or all> | clear",
+                    "/wp add [имя] | del [имя или номер] | rename <номер> <имя> | list | share <номер> <игрок или all> | clear",
+                ),
+            ]
+        };
+        if verb.is_empty() || verb == "help" {
+            return help();
+        }
+        if self.waypoints_of.is_none() {
+            return vec![pick("Open a world first", "Сначала зайдите в мир")];
+        }
+        let dim = self.dim().to_owned();
+        let (px, py, pz) = (self.player.0, self.player.1, self.player.2);
+        let mine: Vec<usize> = self
+            .waypoints
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.dim == dim)
+            .map(|(i, _)| i)
+            .collect();
+        let away = |w: &Waypoint| {
+            let (dx, dy, dz) = (f64::from(w.x) + 0.5 - px, f64::from(w.y) - py, f64::from(w.z) + 0.5 - pz);
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        };
+        let clean = |name: &str| -> String {
+            name.chars().filter(|c| !c.is_control() && *c != '|' && *c != '"').take(32).collect::<String>().trim().to_owned()
+        };
+        match verb.as_str() {
+            "add" | "set" => {
+                let (bx, by, bz) = (px.floor() as i32, py.floor() as i32, pz.floor() as i32);
+                let name = clean(rest);
+                // On a waypoint: that one is renamed, they do not stack.
+                let here = mine.iter().copied().find(|&i| {
+                    let w = &self.waypoints[i];
+                    w.x == bx && w.z == bz && (w.y - by).abs() <= 1
+                });
+                if let Some(i) = here {
+                    if name.is_empty() {
+                        return vec![pick(
+                            format!("{} is already here", self.waypoints[i].name),
+                            format!("Метка {} уже здесь", self.waypoints[i].name),
+                        )];
+                    }
+                    self.waypoints[i].name = name.clone();
+                    self.wp_dirty = true;
+                    return vec![pick(format!("Renamed to {name}"), format!("Метка переименована: {name}"))];
+                }
+                if self.waypoints.len() >= 2000 {
+                    return vec![pick("Too many waypoints", "Слишком много меток")];
+                }
+                let name = if name.is_empty() { format!("Waypoint {}", mine.len() + 1) } else { name };
+                let color = COLORS[self.waypoints.len() % COLORS.len()];
+                self.waypoints.push(Waypoint { name: name.clone(), x: bx, y: by, z: bz, color, dim, shape: 0, group: String::new(), hidden: false });
+                self.wp_dirty = true;
+                vec![pick(
+                    format!("Waypoint {name} added at {bx} {by} {bz}"),
+                    format!("Метка {name} добавлена: {bx} {by} {bz}"),
+                )]
+            }
+            "del" | "delete" | "remove" => {
+                let target = if rest.is_empty() {
+                    mine.iter().copied().min_by(|&a, &b| away(&self.waypoints[a]).total_cmp(&away(&self.waypoints[b])))
+                } else {
+                    self.find_waypoint(&mine, rest)
+                };
+                let Some(i) = target else {
+                    return vec![pick("No such waypoint", "Такой метки нет")];
+                };
+                let gone = self.waypoints.remove(i);
+                self.wp_dirty = true;
+                vec![pick(format!("Waypoint {} removed", gone.name), format!("Метка {} удалена", gone.name))]
+            }
+            "rename" => {
+                let Some((what, name)) = rest.split_once(char::is_whitespace) else {
+                    return help();
+                };
+                let name = clean(name);
+                let Some(i) = self.find_waypoint(&mine, what).filter(|_| !name.is_empty()) else {
+                    return vec![pick("No such waypoint", "Такой метки нет")];
+                };
+                self.waypoints[i].name = name.clone();
+                self.wp_dirty = true;
+                vec![pick(format!("Renamed to {name}"), format!("Метка переименована: {name}"))]
+            }
+            "list" => {
+                if mine.is_empty() {
+                    return vec![pick("No waypoints here", "Здесь нет меток")];
+                }
+                let mut lines: Vec<String> = mine
+                    .iter()
+                    .enumerate()
+                    .take(30)
+                    .map(|(n, &i)| {
+                        let w = &self.waypoints[i];
+                        format!("{}. {}  {} {} {}  {} m", n + 1, w.name, w.x, w.y, w.z, away(w).round() as i64)
+                    })
+                    .collect();
+                if mine.len() > 30 {
+                    lines.push(format!("... {}", mine.len() - 30));
+                }
+                lines
+            }
+            "share" => {
+                let Some((what, who)) = rest.split_once(char::is_whitespace) else {
+                    return help();
+                };
+                let who = who.trim();
+                let Some(i) = self.find_waypoint(&mine, what) else {
+                    return vec![pick("No such waypoint", "Такой метки нет")];
+                };
+                let line = share_line(&self.waypoints[i]);
+                if who.eq_ignore_ascii_case("all") {
+                    self.pending = Some(line);
+                    return vec![pick("Shared with everyone", "Отправлено всем в чат")];
+                }
+                // A private message: it works on every server and only that player reads it.
+                if who.is_empty() || who.len() > 32 || !who.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')) {
+                    return vec![pick("Say a player's name, or all", "Укажите ник игрока или all")];
+                }
+                self.pending = Some(format!("/msg {who} {line}"));
+                vec![pick(format!("Sent to {who}"), format!("Отправлено игроку {who}"))]
+            }
+            "clear" => {
+                if rest != "confirm" {
+                    return vec![pick(
+                        format!("This removes {} waypoints here: /wp clear confirm", mine.len()),
+                        format!("Это удалит меток: {}. Подтвердите: /wp clear confirm", mine.len()),
+                    )];
+                }
+                self.waypoints.retain(|w| w.dim != dim);
+                self.wp_dirty = true;
+                vec![pick("Waypoints removed", "Метки удалены")]
+            }
+            _ => help(),
         }
     }
 
     /// Write what changed.
     fn flush(&mut self) {
         if let Some(dir) = &self.dir
-            && let Err(e) = self.map.save_dirty(dir)
+            && let Err(e) = self.map.save_dirty(dir, usize::MAX, false)
         {
             log::warn!("World Map: could not save the map: {e}");
         }
@@ -454,8 +694,19 @@ impl State {
         }
     }
 
+    /// Every now and then: a region of the map, by another thread, and the waypoints.
+    fn flush_a_little(&mut self) {
+        if let Some(dir) = &self.dir {
+            let _ = self.map.save_dirty(dir, 1, true);
+        }
+        if self.wp_dirty {
+            self.save_waypoints();
+        }
+    }
+
     /// Not in a world: save, and let go of it.
     fn leave(&mut self) {
+        self.key_memo = None;
         if self.loaded.is_some() {
             self.flush();
             self.map.clear();
@@ -494,8 +745,13 @@ impl State {
             self.waypoints_of = Some(key.to_owned());
             self.load_waypoints();
         }
-        let chunks = self.dir.as_ref().map_or(0, |d| self.map.load_dir(d));
-        log::info!("World Map: {key} {dim}: {chunks} explored chunks read");
+        // The files are read a little in each frame (`load_step`), the nearest to the player first.
+        let near = ((self.player.0.floor() as i32) >> 4, (self.player.2.floor() as i32) >> 4);
+        if let Some(d) = &self.dir {
+            self.map.begin_load(d, near);
+            self.log_read = true;
+        }
+        log::info!("World Map: {key} {dim}: reading {} region files", self.map.loading().0);
     }
 
     fn load_waypoints(&mut self) {
@@ -526,8 +782,16 @@ impl State {
         let mut text = String::new();
         for w in &self.waypoints {
             text.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{:06x}\t{}\t{}\t{}\n",
-                w.name, w.x, w.y, w.z, w.color, w.dim, w.shape, w.group
+                "{}\t{}\t{}\t{}\t{:06x}\t{}\t{}\t{}\t{}\n",
+                w.name,
+                w.x,
+                w.y,
+                w.z,
+                w.color,
+                w.dim,
+                w.shape,
+                w.group,
+                u8::from(w.hidden)
             ));
         }
         text
@@ -554,9 +818,9 @@ impl State {
         }
     }
 
-    /// Whether a waypoint is shown: not in a group that is hidden.
+    /// Whether a waypoint is shown: not hidden itself, nor in a group that is hidden.
     fn group_visible(&self, w: &Waypoint) -> bool {
-        w.group.is_empty() || !self.hidden_groups.contains(&w.group)
+        !w.hidden && (w.group.is_empty() || !self.hidden_groups.contains(&w.group))
     }
 
     /// Write the waypoints to `exports/waypoints.txt` in the map's folder.
@@ -768,11 +1032,8 @@ impl State {
         // The other players: a white diamond each, bright at the player's height and dim above
         // or below it.
         if self.settings.players {
-            for e in game.native_client_entities() {
-                if !e.alive || e.invisible || e.player_name.is_none() {
-                    continue;
-                }
-                let (dx, dz) = (e.position[0] - px, e.position[2] - pz);
+            for (_, position) in &self.players {
+                let (dx, dz) = (position[0] - px, position[2] - pz);
                 let player = true;
                 if dx.hypot(dz) < 1.2 {
                     continue;
@@ -782,7 +1043,7 @@ impl State {
                 if mx.abs() > half - 2.0 || mz.abs() > half - 2.0 {
                     continue;
                 }
-                let away = (e.position[1] - py).abs().min(24.0);
+                let away = (position[1] - py).abs().min(24.0);
                 let alpha = 255 - (away / 24.0 * 165.0) as u32;
                 let (r, rgb) = if player { (2.6, 0xFFFFFF) } else { (2.0, 0xFFE04B) };
                 let (cx, cy) = (centre.0 + mx, centre.1 + mz);
@@ -936,6 +1197,7 @@ impl State {
             .filter(|w| w.name.starts_with("Death") || w.name.starts_with("Смерть"))
             .count();
         let dim = self.dim().to_owned();
+        self.note(pick(format!("Waypoint Death set at {} {} {}", x.floor() as i32, y.floor() as i32, z.floor() as i32), format!("Метка Смерть поставлена: {} {} {}", x.floor() as i32, y.floor() as i32, z.floor() as i32)));
         self.waypoints.push(Waypoint {
             name: if count == 0 {
                 tr("Death").into_owned()
@@ -949,6 +1211,7 @@ impl State {
             dim,
             shape: 2,
             group: String::new(),
+            hidden: false,
         });
         self.wp_dirty = true;
     }
@@ -972,7 +1235,12 @@ impl State {
         if gw < 1.0 || gh < 1.0 {
             return None;
         }
-        let scale = (gw.max(gh) / 1024.0).ceil().max(1.0);
+        // While the map zooms its picture is drawn coarser (a ninth of the work): it changes
+        // too fast to be seen as it is, and it is drawn as it is once the zoom has stopped.
+        let base = (gw.max(gh) / 1024.0).ceil().max(1.0);
+        self.quality = quality_for(self.px_cost, gw / base, gh / base, self.quality);
+        let coarse = if self.bpp != self.zoom_to { self.quality.max(3.0) } else { self.quality };
+        let scale = base * coarse;
         let (sw, sh) = ((gw / scale).ceil() as usize, (gh / scale).ceil() as usize);
         let pad_x = ((1024 - sw.min(1024)) / 2).min(160);
         let pad_y = ((1024 - sh.min(1024)) / 2).min(160);
@@ -1000,7 +1268,10 @@ impl State {
         } else {
             DAY
         };
+        let started = Instant::now();
         if self.shown_mut().compose(layer, ix, iz, b, w, h, light, None) {
+            let cost = started.elapsed().as_secs_f32() * 1000.0 / (w * h) as f32;
+            self.px_cost = if self.px_cost == 0.0 { cost } else { self.px_cost * 0.7 + cost * 0.3 };
             self.slot = 1;
             Some((w, h, self.shown().image.clone()))
         } else {
@@ -1096,8 +1367,9 @@ impl State {
             self.view_dim = Some(next.to_owned());
             self.other.clear();
             if let Some(base) = &self.base {
-                let chunks = self.other.load_dir(&base.join(next.replace(':', "_")));
-                log::info!("World Map: {next} shown, {chunks} explored chunks read");
+                let near = ((self.cx.floor() as i32) >> 4, (self.cz.floor() as i32) >> 4);
+                self.other.begin_load(&base.join(next.replace(':', "_")), near);
+                log::info!("World Map: {next} shown, reading {} region files", self.other.loading().0);
             }
         }
         self.map.invalidate();
@@ -1210,6 +1482,35 @@ impl State {
                 .and_then(|i| self.waypoints.get(i))
                 .map_or(COLORS[self.waypoints.len() % COLORS.len()], |w| w.color)
         })
+    }
+
+    /// The sharing confirmation: `[x, y, width, height]`, in the middle, and its Yes and No.
+    fn confirm_rect(&self) -> [f32; 4] {
+        let (w, h) = (300.0, 92.0);
+        [
+            ((self.gui.0 - w) / 2.0).round(),
+            ((self.gui.1 - h) / 2.0).round(),
+            w,
+            h,
+        ]
+    }
+
+    fn confirm_buttons(&self) -> ([f32; 4], [f32; 4]) {
+        let r = self.confirm_rect();
+        let y = r[1] + r[3] - 25.0;
+        let no = [r[0] + r[2] / 2.0 + 4.0, y, 90.0, 18.0];
+        let yes = [r[0] + r[2] / 2.0 - 4.0 - 90.0, y, 90.0, 18.0];
+        (yes, no)
+    }
+
+    /// The answer to the sharing confirmation: yes sends the waypoint to the chat.
+    fn answer_share(&mut self, yes: bool) {
+        let Some(i) = self.confirm_share.take() else {
+            return;
+        };
+        if yes && let Some(w) = self.waypoints.get(i) {
+            self.pending = Some(share_line(w));
+        }
     }
 
     /// The dialog's Save and Cancel buttons.
@@ -1389,9 +1690,17 @@ impl State {
                         self.wp_dirty = true;
                     }
                     4 => self.begin_group(i),
-                    _ => {
-                        self.waypoints.remove(i);
+                    5 => {
+                        let w = &mut self.waypoints[i];
+                        w.hidden = !w.hidden;
                         self.wp_dirty = true;
+                    }
+                    // Everyone in the chat will see it: ask first.
+                    6 => self.confirm_share = Some(i),
+                    _ => {
+                        let gone = self.waypoints.remove(i);
+                        self.wp_dirty = true;
+                        self.note(pick(format!("Waypoint {} removed", gone.name), format!("Метка {} удалена", gone.name)));
                     }
                 }
             }
@@ -1481,6 +1790,7 @@ impl State {
         let y = self.ground_y(x, z).unwrap_or(self.player.1 as i32);
         let color = picked.unwrap_or(COLORS[self.waypoints.len() % COLORS.len()]);
         let dim = self.view_dim_id().to_owned();
+        self.note(pick(format!("Waypoint {name} set at {x} {y} {z}"), format!("Метка {name} поставлена: {x} {y} {z}")));
         self.waypoints.push(Waypoint {
             name,
             x,
@@ -1490,6 +1800,7 @@ impl State {
             dim,
             shape: 0,
             group: String::new(),
+            hidden: false,
         });
         self.wp_dirty = true;
     }
@@ -1549,16 +1860,59 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
+/// The name of a key as a short word for a menu (`key.keyboard.delete` is DEL).
+fn key_label(key: &str) -> String {
+    let k = key.strip_prefix("key.keyboard.").or_else(|| key.strip_prefix("key.")).unwrap_or(key);
+    match k {
+        "delete" => "DEL".to_owned(),
+        "backspace" => "BKSP".to_owned(),
+        "enter" => "ENTER".to_owned(),
+        "space" => "SPACE".to_owned(),
+        "insert" => "INS".to_owned(),
+        "page_up" => "PGUP".to_owned(),
+        "page_down" => "PGDN".to_owned(),
+        "left.shift" | "right.shift" => "SHIFT".to_owned(),
+        "left.control" | "right.control" => "CTRL".to_owned(),
+        "left.alt" | "right.alt" => "ALT".to_owned(),
+        "unknown" => String::new(),
+        other => other.rsplit('.').next().unwrap_or(other).to_uppercase().chars().take(5).collect(),
+    }
+}
+
+/// The hotkey in front of each row of a menu, as the player has the keys set.
+fn menu_tags(game: &Game<'_>, kind: MenuKind) -> Vec<Option<String>> {
+    match kind {
+        MenuKind::Waypoint(_) => {
+            let kb = keys(game);
+            let tag = |k: &str| Some(key_label(k)).filter(|l| !l.is_empty());
+            vec![
+                tag(&kb.wp_edit),
+                tag(&kb.wp_teleport),
+                None,
+                None,
+                None,
+                tag(&kb.wp_hide),
+                None,
+                tag(&kb.wp_delete),
+            ]
+        }
+        MenuKind::Ground { .. } => vec![None; kind.labels().len()],
+    }
+}
+
 /// Open the menu for `kind` at the pointer: as wide as its widest line, and kept on the
 /// screen.
 fn open_menu(game: &Game<'_>, s: &mut State, kind: MenuKind, mouse: [f32; 2]) {
     let (head1, head2, ..) = s.menu_head(kind);
     let mut width = MENU_W;
-    for line in [head1.as_str(), head2.as_str()]
-        .into_iter()
-        .chain(kind.labels().iter().copied())
-    {
+    let tags = menu_tags(game, kind);
+    let tag_w = tags.iter().flatten().map(|t| width_of(game, t)).fold(0.0_f32, f32::max);
+    let tag_w = if tag_w > 0.0 { tag_w + 5.0 } else { 0.0 };
+    for line in [head1.as_str(), head2.as_str()] {
         width = width.max(width_of(game, line) + 14.0);
+    }
+    for line in kind.labels() {
+        width = width.max(width_of(game, line) + tag_w + 14.0);
     }
     s.menu_w = width.min(s.gui.0 - 4.0);
     let height = menu_height(kind.labels().len());
@@ -1793,6 +2147,12 @@ fn ru_text(text: &str) -> Option<&'static str> {
         "Other players on the map" => "Другие игроки на карте",
         "Day and night on the map" => "День и ночь на карте",
         "Minimap" => "Миникарта",
+        "Share" => "Поделиться",
+        "Hide / show" => "Скрыть / показать",
+        "Edit Waypoint" => "Изменить метку",
+        "Teleport to Waypoint" => "Телепорт к метке",
+        "Disable Waypoint" => "Скрыть метку",
+        "Delete Waypoint" => "Удалить метку",
         "Rotate the minimap" => "Вращать миникарту",
         "Group..." => "Группа...",
         "Waypoint group" => "Группа метки",
@@ -1954,7 +2314,17 @@ pub fn frame(game: &mut Game<'_>) {
             s.settings_loaded = true;
         });
     }
-    let key = {
+    let cached = with(|s| {
+        s.key_tick = s.key_tick.wrapping_add(1);
+        if s.key_tick % 15 != 0 {
+            s.key_memo.as_ref().map(|m| m.2.clone())
+        } else {
+            None
+        }
+    });
+    let key = if let Some(known) = cached {
+        known
+    } else {
         let base = world_key(game);
         let seed = game.remote.as_ref().map_or(0, |r| r.hashed_seed);
         let known = with(|s| match &s.key_memo {
@@ -2045,6 +2415,17 @@ pub fn frame(game: &mut Game<'_>) {
             s.live_anchor = f64::NAN;
             None
         };
+        // Looking at the map, or cut at the player's height: every frame; else every third.
+        s.scan_tick = s.scan_tick.wrapping_add(1);
+        let scan_now = open || live.is_some() || s.scan_tick % 3 == 0;
+        if scan_now {
+        // The files of the map, a little in each frame (a big map must not hold up the game).
+        let reading = s.map.load_step(LOAD_BUDGET);
+        s.other.load_step(LOAD_BUDGET);
+        if !reading && s.log_read {
+            s.log_read = false;
+            log::info!("World Map: {} explored chunks read", s.map.loading().1);
+        }
         s.map.update(
             &game.world,
             game.res.facts(),
@@ -2060,6 +2441,7 @@ pub fn frame(game: &mut Game<'_>) {
             scan_layer,
             live,
         );
+        }
         s.waiting = if open && s.view_layer == scan_layer.map_or(SURFACE, |c| c.0) {
             s.map
                 .pending(&game.world, center, radius, s.view_layer, 96)
@@ -2068,7 +2450,7 @@ pub fn frame(game: &mut Game<'_>) {
         };
         if s.last_save.elapsed() >= SAVE_EVERY {
             s.last_save = Instant::now();
-            s.flush();
+            s.flush_a_little();
         }
         if open {
             s.ease_zoom();
@@ -2081,6 +2463,26 @@ pub fn frame(game: &mut Game<'_>) {
     if let Some((w, h, rgba)) = upload {
         game.native_mod_image(w as u32, h as u32, &rgba);
     }
+    // The other players, four times a second (the game copies every creature to tell them).
+    let want_players = with(|s| {
+        s.settings.players
+            && (s.settings.minimap || open)
+            && s.players_at.elapsed() >= Duration::from_millis(250)
+    });
+    if want_players {
+        let list: Vec<(String, [f64; 3])> = game
+            .native_client_entities()
+            .into_iter()
+            .filter(|e| e.alive && !e.invisible)
+            .filter_map(|e| e.player_name.map(|name| (name, e.position)))
+            .collect();
+        with(|s| {
+            s.players = list;
+            s.players_at = Instant::now();
+        });
+    } else if with(|s| !s.settings.players && !s.players.is_empty()) {
+        with(|s| s.players.clear());
+    }
     // The minimap shares the image with the map screen: it draws its own when the screen is shut.
     let mini = with(|s| {
         if s.settings.minimap && !open && !dead {
@@ -2091,6 +2493,10 @@ pub fn frame(game: &mut Game<'_>) {
     });
     if let Some((size, rgba)) = mini {
         game.native_mod_image(size as u32, size as u32, &rgba);
+    }
+    // What the map has to tell, in the chat.
+    for line in with(|s| std::mem::take(&mut s.notes)) {
+        chat(game, &line);
     }
     // A teleport the menu asked for: close the map, then the command.
     if let Some(command) = with(|s| s.pending.take()) {
@@ -2191,6 +2597,18 @@ pub fn pressed(game: &Game<'_>, screen: &NativeScreenView<'_>, button: i32, canc
                     s.entering = None;
                     s.editing = None;
                     s.entering_color = None;
+                }
+            }
+            return;
+        }
+        if s.confirm_share.is_some() {
+            s.ui_press = true;
+            if button == 0 {
+                let (yes, no) = s.confirm_buttons();
+                if inside(yes, mouse) {
+                    s.answer_share(true);
+                } else if inside(no, mouse) {
+                    s.answer_share(false);
                 }
             }
             return;
@@ -2425,6 +2843,10 @@ struct Keys {
     waypoints: String,
     goto: String,
     list: String,
+    wp_edit: String,
+    wp_teleport: String,
+    wp_hide: String,
+    wp_delete: String,
 }
 
 fn keys(game: &Game<'_>) -> Keys {
@@ -2443,6 +2865,10 @@ fn keys(game: &Game<'_>) -> Keys {
         waypoints: get("waypoints"),
         goto: get("goto"),
         list: get("list"),
+        wp_edit: get("wp_edit"),
+        wp_teleport: get("wp_teleport"),
+        wp_hide: get("wp_hide"),
+        wp_delete: get("wp_delete"),
     }
 }
 
@@ -2603,6 +3029,40 @@ pub fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
             s.typing_key(key);
             return;
         }
+        if s.confirm_share.is_some() {
+            *canceled = true;
+            match key {
+                "key.keyboard.enter" | "key.keyboard.keypad.enter" => s.answer_share(true),
+                "key.keyboard.escape" => s.answer_share(false),
+                _ => {}
+            }
+            return;
+        }
+        // The hotkeys of a waypoint's menu, and of the waypoint under the pointer.
+        let target = match s.menu {
+            Some((MenuKind::Waypoint(i), _)) => Some(i),
+            Some(_) => None,
+            None => s.waypoint_at(s.mouse),
+        };
+        if let Some(i) = target.filter(|&i| i < s.waypoints.len()) {
+            let row = if key == kb.wp_edit {
+                Some(0)
+            } else if key == kb.wp_teleport {
+                Some(1)
+            } else if key == kb.wp_hide {
+                Some(5)
+            } else if key == kb.wp_delete {
+                Some(7)
+            } else {
+                None
+            };
+            if let Some(row) = row {
+                *canceled = true;
+                s.menu = None;
+                s.menu_action(MenuKind::Waypoint(i), row);
+                return;
+            }
+        }
         // Escape closes the cave panel before it closes the screen.
         if s.cave_panel && key == "key.keyboard.escape" {
             s.cave_panel = false;
@@ -2673,12 +3133,6 @@ pub fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
                 let at = s.mouse;
                 s.begin_waypoint(at);
             }
-            "key.keyboard.delete" => {
-                if let Some(i) = s.waypoint_at(s.mouse) {
-                    s.waypoints.remove(i);
-                    s.wp_dirty = true;
-                }
-            }
             // Escape and the rest are the game's.
             _ => *canceled = false,
         }
@@ -2688,6 +3142,76 @@ pub fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
 // -- Drawing -------------------------------------------------------------------
 
 /// A waypoint's marker: a diamond, a square or a pennant, with a dark outline.
+/// How much coarser than the screen the map's image is to be drawn: 1 while a sharp image
+/// (`w` x `h`, with its margin) costs under 16 ms, else just enough that it does. `now` is
+/// kept unless the need has moved well away from it, so the image does not change size back and
+/// forth.
+fn quality_for(px_cost: f32, w: f32, h: f32, now: f32) -> f32 {
+    if px_cost <= 0.0 {
+        return now;
+    }
+    let sharp_ms = px_cost * w * h * 1.8;
+    let needed = (sharp_ms / 16.0).sqrt().clamp(0.5, 3.0);
+    let target = if needed <= 1.15 { 1.0 } else { (needed * 4.0).ceil() / 4.0 };
+    if target > now || needed < now * 0.8 { target } else { now }
+}
+
+/// A letter, white with a dark edge: it reads on any colour.
+fn outlined(game: &Game<'_>, batch: &mut HudBatch, text: &str, x: f32, y: f32) {
+    let left = (x - width_of(game, text) / 2.0).round();
+    let top = y.round();
+    for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-1.0, 1.0), (1.0, 1.0)] {
+        say(game, batch, text, [left + dx, top + dy], 0x0A_0C12, false);
+    }
+    say(game, batch, text, [left, top], 0xFFFFFF, false);
+}
+
+/// A waypoint on the map: its colour in the shape it has (a diamond, a square or a pin), big
+/// enough for its first letter, lit with a white edge when the pointer is on it.
+fn badge(game: &Game<'_>, batch: &mut HudBatch, x: f32, y: f32, w: &Waypoint, hot: bool) {
+    let fill = 0xFF00_0000 | w.color;
+    // The shape: its outline and then its colour, from the outside in.
+    let layers: [(f32, u32); 3] = if hot {
+        [(2.6, 0xFFFF_FFFF), (1.3, 0xFF0A_0C12), (0.0, fill)]
+    } else {
+        [(1.3, 0xFF0A_0C12), (0.0, fill), (0.0, fill)]
+    };
+    for (grow, color) in layers {
+        match w.shape {
+            1 => {
+                let h = 6.5 + grow;
+                game.native_fill(batch, [x - h, y - h, h * 2.0, h * 2.0], color);
+            }
+            2 => {
+                // A pin: a square with a point under it.
+                let h = 6.5 + grow;
+                game.native_fill(batch, [x - h, y - h - 1.0, h * 2.0, h * 2.0], color);
+                game.native_quad(
+                    batch,
+                    [
+                        [x - 4.0 - grow, y + h - 1.0],
+                        [x + 4.0 + grow, y + h - 1.0],
+                        [x + 4.0 + grow, y + h - 1.0],
+                        [x, y + h + 4.0 + grow],
+                    ],
+                    color,
+                );
+            }
+            _ => {
+                let r = 9.0 + grow;
+                game.native_quad(
+                    batch,
+                    [[x, y - r], [x + r, y], [x, y + r], [x - r, y]],
+                    color,
+                );
+            }
+        }
+    }
+    let initial: String = w.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+    let dy = if w.shape == 2 { -4.5 } else { -3.5 };
+    outlined(game, batch, &initial, x, y + dy);
+}
+
 fn marker(game: &Game<'_>, batch: &mut HudBatch, x: f32, y: f32, r: f32, rgb: u32, shape: u8) {
     let (outline, fill) = match shape {
         1 => (
@@ -2738,7 +3262,7 @@ fn waypoint_icon(game: &Game<'_>, batch: &mut HudBatch, x: f32, y: f32, w: &Wayp
     game.native_fill(batch, [x - 7.0, y - 7.0, 14.0, 14.0], 0xC000_0000);
     game.native_fill(batch, [x - 6.0, y - 6.0, 12.0, 12.0], 0xFF00_0000 | w.color);
     let initial: String = w.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-    centered_text(game, batch, &initial, x, y - 3.5, 0xFFFFFF);
+    outlined(game, batch, &initial, x, y - 3.5);
     let lw = width_of(game, label);
     game.native_fill(batch, [(x - lw / 2.0 - 3.0).round(), y + 9.0, lw + 6.0, 12.0], 0xA000_0000);
     centered_text(game, batch, label, x, y + 11.5, 0xFFFFFF);
@@ -2926,7 +3450,7 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
         // The chunk under the pointer.
         let (mx, mz) = s.to_world(mouse);
         let (bx, bz) = (mx.floor() as i32, mz.floor() as i32);
-        if free && chunk_px >= 5.0 && mouse[1] < gh - TOOL_H - 8.0 {
+        if free && chunk_px >= 5.0 && mouse[1] < gh - TOOL_H - 8.0 && s.waypoint_at(mouse).is_none() {
             let (x, y) = s.to_screen(f64::from((bx >> 4) * 16), f64::from((bz >> 4) * 16));
             brackets(game, batch, [x, y, chunk_px, chunk_px], 0xE000_0000 | ACCENT);
         }
@@ -2960,17 +3484,17 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
             || (s.list_open && inside(s.list_rect(), mouse))
             || mouse[1] >= gh - TOOL_H - 12.0;
         let hovered = if free && !over_panel { s.waypoint_at(mouse) } else { None };
-        for w in s
+        for (n, w) in s
             .waypoints
             .iter()
-            .filter(|w| s.show_waypoints && w.dim == s.view_dim_id() && s.group_visible(w))
+            .enumerate()
+            .filter(|(_, w)| s.show_waypoints && w.dim == s.view_dim_id() && s.group_visible(w))
         {
             let (x, y) = s.to_screen(f64::from(w.x) + 0.5, f64::from(w.z) + 0.5);
             if x < -20.0 || y < -20.0 || x > gw + 20.0 || y > gh + 20.0 {
                 continue;
             }
-            marker(game, batch, x, y, 4.0, w.color, w.shape);
-            centered_text(game, batch, &w.name, x, y - 15.0, w.color);
+            badge(game, batch, x, y, w, hovered == Some(n));
         }
 
         // The player: a chevron where they stand, pointing where they face.
@@ -2995,14 +3519,11 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
 
         // Other players, where the game knows them.
         if s.settings.players && !s.viewing_other() {
-            for e in game.native_client_entities() {
-                let Some(name) = &e.player_name else {
-                    continue;
-                };
-                if !e.alive || e.invisible || (e.position[0] - px).hypot(e.position[2] - pz) < 1.5 {
+            for (name, position) in &s.players {
+                if (position[0] - px).hypot(position[2] - pz) < 1.5 {
                     continue;
                 }
-                let (x, y) = s.to_screen(e.position[0], e.position[2]);
+                let (x, y) = s.to_screen(position[0], position[2]);
                 if x < -20.0 || y < -20.0 || x > gw + 20.0 || y > gh + 20.0 {
                     continue;
                 }
@@ -3280,15 +3801,58 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
             }
         }
 
-        // The waypoint under the pointer.
+        // The waypoint under the pointer: its name, its place, how far it is and what it is in,
+        // and the hotkeys it answers to.
         if let Some(i) = hovered {
             let w = &s.waypoints[i];
-            let line = format!("{}  ({}, {}, {})", w.name, w.x, w.y, w.z);
-            let lw = width_of(game, &line);
-            let tx = (mouse[0] + 10.0).min(gw - lw - 10.0).max(4.0);
-            let ty = (mouse[1] + 10.0).min(gh - 40.0);
-            panel(game, batch, [tx - 4.0, ty - 3.0, lw + 10.0, 13.0]);
-            say(game, batch, &line, [tx + 2.0, ty], w.color, true);
+            let kb = keys(game);
+            let mut lines: Vec<(String, u32)> = vec![
+                (w.name.clone(), w.color),
+                (format!("X {}   Y {}   Z {}", w.x, w.y, w.z), TEXT),
+            ];
+            let mut facts: Vec<String> = Vec::new();
+            if !s.viewing_other() {
+                let far = ((f64::from(w.x) + 0.5 - px).powi(2) + (f64::from(w.z) + 0.5 - pz).powi(2)).sqrt();
+                let unit = if ru() { "м" } else { "m" };
+                facts.push(if far >= 10_000.0 {
+                    format!("{:.1}k {unit}", far / 1000.0)
+                } else {
+                    format!("{} {unit}", far.round() as i64)
+                });
+            }
+            if !w.group.is_empty() {
+                facts.push(w.group.clone());
+            }
+            if !facts.is_empty() {
+                lines.push((facts.join("  \u{b7}  "), MUTED));
+            }
+            let keys_line = [
+                (&kb.wp_edit, pick("Edit", "Изменить")),
+                (&kb.wp_teleport, pick("Teleport", "Телепорт")),
+                (&kb.wp_hide, pick("Hide", "Скрыть")),
+                (&kb.wp_delete, pick("Delete", "Удалить")),
+            ]
+            .iter()
+            .filter(|(k, _)| !key_label(k).is_empty())
+            .map(|(k, what)| format!("{} {what}", key_label(k)))
+            .collect::<Vec<_>>()
+            .join("   ");
+            let width = lines
+                .iter()
+                .map(|l| width_of(game, &l.0))
+                .chain(std::iter::once(width_of(game, &keys_line)))
+                .fold(0.0_f32, f32::max)
+                + 16.0;
+            let height = (lines.len() as f32 + 1.0) * 11.0 + 7.0;
+            let tx = if mouse[0] + 14.0 + width > gw - 4.0 { mouse[0] - 14.0 - width } else { mouse[0] + 14.0 };
+            let ty = (mouse[1] + 12.0).min(gh - TOOL_H - 16.0 - height).max(4.0);
+            game.native_fill(batch, [tx - 1.0, ty - 1.0, width + 2.0, height + 2.0], EDGE);
+            game.native_fill(batch, [tx, ty, width, height], 0xF010_141C);
+            game.native_fill(batch, [tx, ty, 2.0, height], 0xFF00_0000 | w.color);
+            for (n, (line, color)) in lines.iter().enumerate() {
+                say(game, batch, line, [tx + 8.0, ty + 4.0 + n as f32 * 11.0], *color, true);
+            }
+            say(game, batch, &keys_line, [tx + 8.0, ty + 6.0 + lines.len() as f32 * 11.0], 0x7FA58A, true);
         }
 
         // The menu.
@@ -3304,6 +3868,9 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
             say(game, batch, &head1, [x + 4.0, y + 3.0], tint, true);
             say(game, batch, &head2, [x + 4.0, y + 13.0], MUTED, true);
             let hot = menu_row_at(at, mw, mouse, rows);
+            let tags = menu_tags(game, kind);
+            let tag_w = tags.iter().flatten().map(|t| width_of(game, t)).fold(0.0_f32, f32::max);
+            let tag_w = if tag_w > 0.0 { tag_w + 5.0 } else { 0.0 };
             for (i, label) in kind.labels().iter().enumerate() {
                 let top = y + MENU_HEAD + i as f32 * MENU_ROW;
                 if hot == Some(i) {
@@ -3311,7 +3878,10 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
                 }
                 let danger = matches!(kind, MenuKind::Waypoint(_)) && i == rows - 1;
                 let color = if danger { 0xFF8080 } else { TEXT };
-                say(game, batch, label, [x + 6.0, top + 3.0], color, true);
+                if let Some(Some(tag)) = tags.get(i) {
+                    say(game, batch, tag, [x + 6.0, top + 3.0], 0x55FF55, true);
+                }
+                say(game, batch, label, [x + 6.0 + tag_w, top + 3.0], color, true);
             }
             let far = ((f64::from(tx) + 0.5 - px).powi(2) + (f64::from(tz) + 0.5 - pz).powi(2)).sqrt();
             let foot = if ru() {
@@ -3326,6 +3896,31 @@ pub fn draw(game: &Game<'_>, batch: &mut HudBatch, screen: &NativeScreenView<'_>
             );
         }
         let _ = py;
+
+        // Sharing a waypoint with everyone in the chat: are you sure?
+        if s.confirm_share.is_some() {
+            let r = s.confirm_rect();
+            game.native_fill(batch, [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], EDGE);
+            game.native_fill(batch, r, 0xF010_141C);
+            game.native_fill(batch, [r[0], r[1], r[2], 2.0], 0xFF00_0000 | ACCENT);
+            let mid = r[0] + r[2] / 2.0;
+            let (a, red, b, c) = if ru() {
+                ("Вы уверены, что хотите поделиться этой меткой", "СО ВСЕМИ", " в чате?", "Убедитесь, что тем самым вы не выдадите секрет.")
+            } else {
+                ("Are you sure you want to share this waypoint", "WITH EVERYONE", " in the chat?", "Make sure you are not giving away a secret.")
+            };
+            centered_text(game, batch, a, mid, r[1] + 9.0, TEXT);
+            let (wr, wb) = (width_of(game, red), width_of(game, b));
+            let left = mid - (wr + wb) / 2.0;
+            say(game, batch, red, [left.round(), r[1] + 21.0], 0xFF5555, true);
+            say(game, batch, b, [(left + wr).round(), r[1] + 21.0], TEXT, true);
+            centered_text(game, batch, c, mid, r[1] + 36.0, MUTED);
+            let (yes, no) = s.confirm_buttons();
+            button(game, batch, yes, inside(yes, mouse), false, true);
+            centered_text(game, batch, if ru() { "Да" } else { "Yes" }, yes[0] + yes[2] / 2.0, yes[1] + 5.0, 0xFFFFFF);
+            button(game, batch, no, inside(no, mouse), false, false);
+            centered_text(game, batch, if ru() { "Нет" } else { "No" }, no[0] + no[2] / 2.0, no[1] + 5.0, TEXT);
+        }
 
         // A name being typed: a field, and Save and Cancel.
         if let Some((name, x, z)) = &s.entering {
@@ -3425,7 +4020,7 @@ pub fn hud(game: &Game<'_>, batch: &mut HudBatch) {
     if !ours(game) {
         with(|s| s.draw_minimap(game, batch));
     }
-    if !with(|s| s.settings.markers) {
+    if !with(|s| s.settings.markers && !s.waypoints.is_empty()) {
         return;
     }
     let Some(cam) = camera_of(game, batch.width, batch.height) else {
@@ -3511,6 +4106,193 @@ fn camera_of(game: &Game<'_>, gw: f32, gh: f32) -> Option<Cam> {
     })
 }
 
+/// The command the green [Add] of a shared place runs (never typed: the game gives it to the mod
+/// before it goes anywhere).
+const COMMAND_ADD: &str = "worldmap_add";
+
+/// The English text or the Russian, by the game's language.
+fn pick(en: impl Into<String>, ru_text: impl Into<String>) -> String {
+    if ru() { ru_text.into() } else { en.into() }
+}
+
+/// A line of the chat from the mod, with its green tag.
+fn chat(game: &mut Game<'_>, line: &str) {
+    game.native_chat(&format!("\u{a7}a[Map] \u{a7}f{line}"));
+}
+
+/// A place somebody shared, as it is in the chat and in what the [Add] runs.
+struct Shared {
+    name: String,
+    x: i32,
+    y: i32,
+    z: i32,
+    dim: String,
+}
+
+/// What is sent to the chat to share a waypoint: plain words, so that a player without the mod
+/// reads the place too (`Waypoint "Home" at 100 64 -200 (overworld)`).
+fn share_line(w: &Waypoint) -> String {
+    let name = w.name.replace(['"', '|'], "'");
+    format!(
+        "Waypoint \"{name}\" at {} {} {} ({})",
+        w.x,
+        w.y,
+        w.z,
+        w.dim.trim_start_matches("minecraft:")
+    )
+}
+
+/// A shared place in a line of chat: where it starts and ends in the line, and the place.
+fn parse_shared(line: &str) -> Option<(usize, usize, Shared)> {
+    let start = line.find("Waypoint \"")?;
+    let after = &line[start + 10..];
+    let quote = after.find("\" at ")?;
+    let rest = &after[quote + 5..];
+    let close = rest.find(')')?;
+    let (numbers, dim) = rest[..close].split_once(" (")?;
+    let end = start + 10 + quote + 5 + close + 1;
+    let n: Vec<i32> = numbers.split(' ').map(|s| s.parse().ok()).collect::<Option<_>>()?;
+    let shared = check_shared(&after[..quote], &n, dim)?;
+    Some((start, end, shared))
+}
+
+/// What the [Add] runs, `name|x|y|z|dimension`, read back.
+fn parse_payload(payload: &str) -> Option<Shared> {
+    let mut f = payload.rsplitn(5, '|');
+    let dim = f.next()?;
+    let z: i32 = f.next()?.parse().ok()?;
+    let y: i32 = f.next()?.parse().ok()?;
+    let x: i32 = f.next()?.parse().ok()?;
+    let name = f.next()?;
+    check_shared(name, &[x, y, z], dim)
+}
+
+/// A shared place, if it is a sane one: a name, coordinates in the world, a dimension's name.
+fn check_shared(name: &str, n: &[i32], dim: &str) -> Option<Shared> {
+    let name = name.trim();
+    if n.len() != 3
+        || name.is_empty()
+        || name.chars().count() > 32
+        || name.chars().any(char::is_control)
+        || name.contains('|')
+        || n[0].abs() > 30_000_000
+        || n[2].abs() > 30_000_000
+        || n[1].abs() > 4096
+        || dim.is_empty()
+        || dim.len() > 48
+        || !dim.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | ':' | '.' | '/' | '-'))
+    {
+        return None;
+    }
+    let dim = if dim.contains(':') { dim.to_owned() } else { format!("minecraft:{dim}") };
+    Some(Shared { name: name.to_owned(), x: n[0], y: n[1], z: n[2], dim })
+}
+
+/// A line of chat from the server, with a shared place in it: the place is told in words and
+/// has a green [Add] that adds it to the map. The click is the mod's own command, so nothing
+/// goes to the server, and a place is added only when it is clicked.
+pub fn chat_received(game: &Game<'_>, message: &mut Text) {
+    if !game.native_on(ID) {
+        return;
+    }
+    let plain = message.plain();
+    let Some((start, end, shared)) = parse_shared(&plain) else {
+        return;
+    };
+    let upto = plain[..end].chars().count();
+    let total = plain.chars().count();
+    let sender = sender_of(&plain[..start]);
+    let payload = format!("{COMMAND_ADD} {}|{}|{}|{}|{}", shared.name, shared.x, shared.y, shared.z, shared.dim);
+    let from = dimension_phrase(&shared.dim);
+    let said = if sender.is_empty() {
+        pick(
+            format!("Shared a waypoint called \"{}\" from {from}! ", shared.name),
+            format!("Поделился меткой «{}» из {from}! ", shared.name),
+        )
+    } else {
+        pick(
+            format!("{sender} shared a waypoint called \"{}\" from {from}! ", shared.name),
+            format!("{sender} поделился меткой «{}» из {from}! ", shared.name),
+        )
+    };
+    let mut out = Text::literal(said);
+    out.push(Text::styled(
+        pick("[Add]", "[Добавить]"),
+        Style {
+            bold: Some(true),
+            underlined: Some(true),
+            click: Some(ClickEvent::RunCommand(payload)),
+            hover: Some(Box::new(Text::literal(format!(
+                "{} ({} {} {})",
+                pick("Click to add this waypoint to your map", "Нажмите, чтобы добавить метку на карту"),
+                shared.x,
+                shared.y,
+                shared.z
+            )))),
+            ..Style::color(0x55FF55)
+        },
+    ));
+    if upto < total {
+        out.push(message.slice(upto, total));
+    }
+    *message = out;
+}
+
+/// Who said a line of chat, from what comes before the place in it: `<Alex> ` or
+/// `Alex whispers to you: `.
+fn sender_of(prefix: &str) -> String {
+    let p = prefix.trim();
+    if let Some(rest) = p.strip_prefix('<')
+        && let Some((name, _)) = rest.split_once('>')
+    {
+        return name.trim().to_owned();
+    }
+    p.split_whitespace().next().unwrap_or("").trim_end_matches(':').to_owned()
+}
+
+/// A dimension as it is said in "from the Nether": in the game's language.
+fn dimension_phrase(dim: &str) -> String {
+    let short = dim.trim_start_matches("minecraft:");
+    if ru() {
+        match short {
+            "overworld" => "Верхнего мира".to_owned(),
+            "the_nether" => "Незера".to_owned(),
+            "the_end" => "Энда".to_owned(),
+            other => other.to_owned(),
+        }
+    } else {
+        short.replace('_', " ")
+    }
+}
+
+/// The mod's own command: the green [Add] of a shared place.
+pub fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
+    if !game.native_on(ID) {
+        return;
+    }
+    let typed = command.trim().trim_start_matches('/');
+    // `/wp ...`: the waypoints from the chat.
+    let (word, args) = typed.split_once(char::is_whitespace).unwrap_or((typed, ""));
+    if word == "wp" {
+        *ran = true;
+        for line in with(|s| s.wp_command(args)) {
+            chat(game, &line);
+        }
+        if let Some(say) = with(|s| s.pending.take())
+            && let Err(e) = game.native_send_chat(&say)
+        {
+            log::warn!("World Map: could not send {say}: {e}");
+        }
+        return;
+    }
+    let Some(payload) = typed.strip_prefix(COMMAND_ADD) else {
+        return;
+    };
+    *ran = true;
+    let line = with(|s| s.add_shared(payload.trim()));
+    chat(game, &line);
+}
+
 /// `m` (column-major, 4 x 4) times `v`.
 fn mul(m: &[f32; 16], v: [f32; 4]) -> [f32; 4] {
     let mut out = [0.0; 4];
@@ -3556,6 +4338,7 @@ mod tests {
             dim: "minecraft:overworld".to_owned(),
             shape: 0,
             group: group.to_owned(),
+            hidden: false,
         };
         s.waypoints = vec![w("a", 5, ""), w("b", 1, "Base"), w("c", 9, "Base")];
         let rows = s.list_rows();
@@ -3590,6 +4373,132 @@ mod tests {
         assert!(west[0] / west[3] > 0.1, "{west:?}");
         let up = project([0.0, 3.0, 10.0]);
         assert!(up[1] / up[3] > 0.1, "{up:?}");
+    }
+
+    #[test]
+    fn a_shared_place_is_told_in_the_chat_and_read_back() {
+        let w = Waypoint {
+            name: "Home \"base\" | 2".to_owned(),
+            x: 100,
+            y: 64,
+            z: -200,
+            color: 0xFFFFFF,
+            dim: "minecraft:the_nether".to_owned(),
+            shape: 0,
+            group: String::new(),
+            hidden: false,
+        };
+        let line = share_line(&w);
+        // Quotes and bars of the name are turned into apostrophes: they are what the line is cut by.
+        assert_eq!(line, "Waypoint \"Home 'base' ' 2\" at 100 64 -200 (the_nether)");
+        // As another player's line shows it: their name before, and the place.
+        let said = format!("<Alex> {line} thanks");
+        let (start, end, shared) = parse_shared(&said).unwrap();
+        assert_eq!(&said[..start], "<Alex> ");
+        assert_eq!(&said[end..], " thanks");
+        assert_eq!((shared.x, shared.y, shared.z), (100, 64, -200));
+        assert_eq!(shared.dim, "minecraft:the_nether");
+        // What the [Add] runs.
+        let back = parse_payload(&format!("{}|{}|{}|{}|{}", shared.name, shared.x, shared.y, shared.z, shared.dim)).unwrap();
+        assert_eq!((back.name, back.x, back.dim), (shared.name, 100, "minecraft:the_nether".to_owned()));
+        // What is not a place, or a sane one, is not taken.
+        assert!(parse_shared("Waypoint \"\" at 1 2 3 (overworld)").is_none());
+        assert!(parse_shared("Waypoint \"A\" at 99999999 2 3 (overworld)").is_none());
+        assert!(parse_shared("Waypoint \"A\" at 1 2 (overworld)").is_none());
+        assert!(parse_shared("Waypoint \"A\" at 1 2 3 (Over World)").is_none());
+        assert!(parse_payload("A|1|2").is_none());
+    }
+
+    #[test]
+    fn keys_are_short_words_in_the_menu_and_the_sender_is_found() {
+        assert_eq!(key_label("key.keyboard.e"), "E");
+        assert_eq!(key_label("key.keyboard.delete"), "DEL");
+        assert_eq!(key_label("key.keyboard.left.shift"), "SHIFT");
+        assert_eq!(key_label("key.keyboard.unknown"), "");
+        assert_eq!(key_label("key.mouse.5"), "5");
+        assert_eq!(sender_of("<Px226> "), "Px226");
+        assert_eq!(sender_of("Px226 whispers to you: "), "Px226");
+        assert_eq!(sender_of(""), "");
+    }
+
+    #[test]
+    fn a_hidden_waypoint_is_not_shown_and_is_kept_in_the_file() {
+        let mut s = State::new();
+        s.waypoints_of = Some("w".to_owned());
+        s.add_shared("Home|1|64|2|overworld");
+        s.waypoints[0].hidden = true;
+        assert!(!s.group_visible(&s.waypoints[0]));
+        let line = s.waypoints_text();
+        assert!(line.trim_end().ends_with("\t1"), "{line:?}");
+        let back = parse_waypoint(line.trim_end(), "x").unwrap();
+        assert!(back.hidden);
+        // The files of 0.6 have no such field: shown.
+        let old = parse_waypoint("A\t1\t2\t3\tffffff\tminecraft:overworld\t0\tG", "x").unwrap();
+        assert!(!old.hidden);
+    }
+
+    #[test]
+    fn wp_commands_add_rename_list_share_and_remove() {
+        let mut s = State::new();
+        s.waypoints_of = Some("w".to_owned());
+        s.loaded = Some(("w".to_owned(), "minecraft:overworld".to_owned()));
+        s.player = (10.5, 64.0, -20.5, 0.0);
+        assert!(s.wp_command("add Home")[0].contains("added"));
+        assert_eq!((s.waypoints[0].x, s.waypoints[0].y, s.waypoints[0].z), (10, 64, -21));
+        // On a waypoint, a new name renames it: they do not stack.
+        assert!(s.wp_command("add Base")[0].contains("Renamed"));
+        assert_eq!((s.waypoints.len(), s.waypoints[0].name.as_str()), (1, "Base"));
+        s.player = (100.5, 64.0, 100.5, 0.0);
+        s.wp_command("add");
+        assert_eq!(s.waypoints[1].name, "Waypoint 2");
+        assert!(s.wp_command("list").len() == 2);
+        assert!(s.wp_command("rename 2 Farm")[0].contains("Renamed"));
+        assert_eq!(s.waypoints[1].name, "Farm");
+        // A share to a player is a private message; to all it is the chat line.
+        s.wp_command("share farm Alex_1");
+        assert!(s.pending.take().unwrap().starts_with("/msg Alex_1 Waypoint \"Farm\" at 100 64 100 (overworld)"));
+        s.wp_command("share 1 all");
+        assert!(s.pending.take().unwrap().starts_with("Waypoint \"Base\""));
+        assert!(s.wp_command("share 1 a b;c")[0].contains("player"));
+        assert!(s.pending.is_none());
+        // Nothing is removed by a bare clear; del without a name takes the nearest.
+        s.wp_command("clear");
+        assert_eq!(s.waypoints.len(), 2);
+        assert!(s.wp_command("del")[0].contains("Farm"));
+        assert_eq!(s.waypoints.len(), 1);
+        assert!(s.wp_command("clear confirm")[0].contains("removed"));
+        assert!(s.waypoints.is_empty());
+        assert!(s.wp_command("nonsense")[0].contains("/wp"));
+    }
+
+    #[test]
+    fn a_slow_computer_gets_a_coarser_image_and_a_fast_one_does_not() {
+        // 0.00002 ms a pixel, 853 x 533 pixels: 16 ms: sharp.
+        assert_eq!(quality_for(0.00002, 853.0, 533.0, 1.0), 1.0);
+        // Three times as slow: coarser, by the square root of 3 or so.
+        let q = quality_for(0.00006, 853.0, 533.0, 1.0);
+        assert!(q > 1.5 && q <= 2.0, "{q}");
+        // It does not come back sharp until the need is well below it.
+        assert_eq!(quality_for(0.000055, 853.0, 533.0, q), q);
+        assert_eq!(quality_for(0.00001, 853.0, 533.0, q), 1.0);
+        // Nothing measured yet: as it is.
+        assert_eq!(quality_for(0.0, 853.0, 533.0, 1.5), 1.5);
+    }
+
+    #[test]
+    fn a_shared_place_is_added_once() {
+        let mut s = State::new();
+        s.waypoints_of = Some("w".to_owned());
+        let first = s.add_shared("Home|1|64|2|overworld");
+        assert_eq!(s.waypoints.len(), 1);
+        assert!(first.contains("added"), "{first}");
+        assert_eq!(s.waypoints[0].dim, "minecraft:overworld");
+        let again = s.add_shared("Home|1|64|2|overworld");
+        assert_eq!(s.waypoints.len(), 1);
+        assert!(again.contains("already"), "{again}");
+        assert!(s.add_shared("nonsense").contains("not valid"));
+        s.waypoints_of = None;
+        assert!(s.add_shared("Other|1|64|2|overworld").contains("world"));
     }
 
     #[test]
