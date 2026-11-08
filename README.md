@@ -95,7 +95,7 @@ Use the launcher: *Add from GitHub* with this repository's link (or, once it is 
 then **Horizon**, search *World Map*). Native mods run with your rights: the launcher asks you to trust it and
 builds Horizon with the mod (a few minutes the first time).
 
-Made for Horizon Nightly `2ebf00a0281c592f79191e76fce0e7d522c6f425` (Minecraft 26.3). On
+Made for Horizon Nightly `fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca` (Minecraft 26.3). On
 another revision the launcher offers *Build anyway*; it may not build there.
 
 ## Files
@@ -178,7 +178,7 @@ other map mod is used here; the interface and the file formats are this mod's ow
 Моды, затем **Horizon**, поиск *World Map*). Нативные моды работают с вашими правами: лаунчер просит довериться моду и
 собирает Horizon вместе с ним (в первый раз несколько минут).
 
-Мод сделан для Horizon Nightly `2ebf00a0281c592f79191e76fce0e7d522c6f425` (Minecraft 26.3).
+Мод сделан для Horizon Nightly `fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca` (Minecraft 26.3).
 На другой версии лаунчер предложит *Build anyway*, но сборка может не пройти.
 
 ## Файлы и лицензия

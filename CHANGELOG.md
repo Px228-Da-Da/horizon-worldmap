@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- **For Horizon Nightly `fdc87ae`** (2026-11-08), the newest: the same mod as 0.7.0, built and tried on it.
+
 ## 0.7.0
 
 - **`/wp` commands** for waypoints from the chat: `/wp add [name]` (on a waypoint it renames it, so they

@@ -1,13 +1,13 @@
 [mod]
 id = "worldmap"
-version = "0.7.0"
+version = "0.7.1"
 priority = 100
 
 # The Horizon commit it is written for (the Nightly the launcher builds). It uses
 # only the native hook points and the mod screen (`native_mod_screen_open`) and
 # image (`native_mod_image`) the game already has.
 [compatibility]
-horizon_revision = "2ebf00a0281c592f79191e76fce0e7d522c6f425"
+horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
 
 # The terrain scan, the explored map on disk and its image: added to the
 # minimap's file, which has the column scan and the map colours it reuses.
