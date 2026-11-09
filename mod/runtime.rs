@@ -798,15 +798,17 @@ impl State {
     }
 
     fn save_waypoints(&mut self) {
-        self.wp_dirty = false;
         let Some(path) = &self.wp_file else {
+            self.wp_dirty = false;
             return;
         };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Err(e) = std::fs::write(path, self.waypoints_text()) {
-            log::warn!("World Map: could not save the waypoints: {e}");
+        // Stay dirty when the write fails, so the next flush tries again once the storage is back.
+        match std::fs::write(path, self.waypoints_text()) {
+            Ok(()) => self.wp_dirty = false,
+            Err(e) => log::warn!("World Map: could not save the waypoints, will retry: {e}"),
         }
         let groups_file = path.with_file_name("groups.txt");
         if self.hidden_groups.is_empty() {
