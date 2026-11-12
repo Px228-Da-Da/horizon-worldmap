@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Mobs on the minimap.** The mobs within 24 blocks of your height, each with its icon from your resource
+  packs when they have one (the icon packs made for minimaps, such as Icon Fresh, which keep them in
+  `assets/xaerominimap/entity/icon/`: a definition for each mob that names a sprite for each of its textures),
+  else a yellow dot. Read again when a pack is turned on or off; *Mobs on the minimap* on the mod's page turns
+  them off.
+
 ## 0.7.1
 
 - **For Horizon Nightly `fdc87ae`** (2026-11-08), the newest: the same mod as 0.7.0, built and tried on it.
