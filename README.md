@@ -53,7 +53,10 @@ A full screen map that writes itself as you explore, for [Horizon](https://playh
   up, with the sides of the world on its edge; or north up), your waypoints (those off it on
   its edge), your place, dark at night like the map. Under a roof or in a cave it shows the
   floor at your height. Other players are dots on it, bright at your height and dim above
-  or below it. Its corner and size are in Options > Mods; `N` shows or hides it,
+  or below it. Mobs within 24 blocks of your height are on it too: each with its icon from
+  your resource packs when one has them (packs made for minimap mob icons, such as
+  Icon Fresh, keep them in `assets/xaerominimap/entity/icon/`), else a yellow dot; a switch on
+  the mod's page turns them off. Its corner and size are in Options > Mods; `N` shows or hides it,
   `Z` changes its scale. Waypoints in the world are a square of their colour with a letter.
 - **Share a place** with a friend: *Share* in a waypoint's menu asks if you really want to share it with
   everyone in the chat; a friend who has the mod sees `Name shared a waypoint called "Home" from
@@ -171,7 +174,10 @@ other map mod is used here; the interface and the file formats are this mod's ow
 - **Миникарта** в углу игры: карта вокруг вас, поворачивается за взглядом (куда смотрите,
   там верх; по краям стороны света; или север сверху), метки (те, что за её краем, на краю),
   ваше место; ночью темнеет, как карта. Под крышей и в пещере показывает пол на вашей
-  высоте. Другие игроки это точки: яркие на вашей высоте, тусклые выше и ниже. Угол и размер
+  высоте. Другие игроки это точки: яркие на вашей высоте, тусклые выше и ниже. Мобы в пределах
+  24 блоков от вашей высоты тоже на ней: со своими значками из ваших ресурспаков, если они там
+  есть (паки значков мобов для миникарт, например Icon Fresh, хранят их в
+  `assets/xaerominimap/entity/icon/`), иначе жёлтой точкой; отключается на странице мода. Угол и размер
   в Настройки > Моды; `N` показывает и прячет её, `Z` меняет масштаб.
   Метки в мире это квадрат цвета метки с буквой.
 - **Поделиться местом** с другом: *Поделиться* в меню метки спрашивает, точно ли отправить её всем в

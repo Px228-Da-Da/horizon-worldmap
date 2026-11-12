@@ -390,6 +390,10 @@ struct State {
     /// The other players the game knows, now and then (copying every creature each frame costs):
     /// name and place, when it was made, and counters that let some work wait for a few frames.
     players: Vec<(String, [f64; 3])>,
+    /// The mobs round the player, read with the players, and the icons the resource packs
+    /// have for them.
+    mobs: Vec<Mob>,
+    icons: Icons,
     players_at: Instant,
     scan_tick: u32,
     key_tick: u32,
@@ -473,6 +477,8 @@ impl State {
             born: Instant::now(),
             last_save: Instant::now(),
             players: Vec::new(),
+            mobs: Vec::new(),
+            icons: Icons::default(),
             players_at: Instant::now(),
             scan_tick: 0,
             key_tick: 0,
@@ -987,6 +993,31 @@ impl State {
         }
     }
 
+    /// The image again, the minimap with the mob icons right of it, when the icons are not in
+    /// it: new ones were read, or the map screen drew over them. Only while the image is the
+    /// minimap's, as the minimap's own uploads leave the icons where they are.
+    fn icon_upload(&mut self) -> Option<(usize, usize, Vec<u8>)> {
+        let size = self.mini_size() as usize;
+        if !self.icons.dirty || self.slot != 2 || self.map.image.len() != size * size * 4 {
+            return None;
+        }
+        self.icons.dirty = false;
+        if self.icons.sprites.is_empty() {
+            return None;
+        }
+        let sheet_w = ICON_COLS * ICON_CELL;
+        let sheet_h = self.icons.sheet.len() / (sheet_w * 4);
+        let (w, h) = (ICON_X + sheet_w, size.max(sheet_h));
+        let mut out = vec![0; w * h * 4];
+        for (row, line) in self.map.image.chunks_exact(size * 4).enumerate() {
+            out[row * w * 4..][..size * 4].copy_from_slice(line);
+        }
+        for (row, line) in self.icons.sheet.chunks_exact(sheet_w * 4).enumerate() {
+            out[(row * w + ICON_X) * 4..][..sheet_w * 4].copy_from_slice(line);
+        }
+        Some((w, h, out))
+    }
+
     /// The minimap in a corner of the game: the map round the player, turned the way they
     /// face (or north up), the waypoints (those off it on its edge), the sides of the world
     /// and the player's place.
@@ -1028,6 +1059,35 @@ impl State {
                 r = 1.8;
             }
             marker(game, batch, centre.0 + mx, centre.1 + mz, r, w.color, w.shape);
+        }
+        // The mobs within `MOB_HEIGHT` blocks of the player's height, under the players: the
+        // icon a resource pack has for each (an icon pack such as Icon Fresh), else a yellow dot.
+        if self.settings.mobs {
+            for mob in &self.mobs {
+                if (mob.position[1] - py).abs() >= MOB_HEIGHT {
+                    continue;
+                }
+                let (u, v) = seen(mob.position[0] - px, mob.position[2] - pz);
+                let (mx, mz) = (u / bpp, v / bpp);
+                let (cx, cy) = (centre.0 + mx, centre.1 + mz);
+                let cell = self.icons.cells.get(&mob.key).copied().flatten().filter(|_| !self.icons.dirty);
+                let r = if cell.is_some() { MOB_ICON / 2.0 } else { 2.0 };
+                if mx.abs() > half - r || mz.abs() > half - r {
+                    continue;
+                }
+                if let Some(cell) = cell {
+                    let [sx, sy] = icon_at(cell);
+                    let side = ICON_CELL as f32;
+                    let _ = game.native_sprite(
+                        batch,
+                        MOD_IMAGE_SPRITE,
+                        [sx, sy, side, side],
+                        [cx - r, cy - r, MOB_ICON, MOB_ICON],
+                    );
+                } else {
+                    game.native_quad(batch, [[cx, cy - r], [cx + r, cy], [cx, cy + r], [cx - r, cy]], 0xFFFF_E04B);
+                }
+            }
         }
         // The other players: a white diamond each, bright at the player's height and dim above
         // or below it.
@@ -2145,6 +2205,7 @@ fn ru_text(text: &str) -> Option<&'static str> {
         "Markers in the world" => "Метки в мире",
         "Waypoint on death" => "Метка при смерти",
         "Other players on the map" => "Другие игроки на карте",
+        "Mobs on the minimap" => "Мобы на миникарте",
         "Day and night on the map" => "День и ночь на карте",
         "Minimap" => "Миникарта",
         "Share" => "Поделиться",
@@ -2186,10 +2247,242 @@ fn ru_text(text: &str) -> Option<&'static str> {
     })
 }
 
+// -- Mob icons -----------------------------------------------------------------
+
+/// The mob icons are in the mod's image right of the minimap (at most 128 pixels wide), in
+/// cells of a 32 pixel icon with a pixel round it for its outline.
+const ICON_X: usize = 128;
+const ICON_CELL: usize = 34;
+const ICON_COLS: usize = (1024 - ICON_X) / ICON_CELL;
+const ICON_ROWS: usize = 1024 / ICON_CELL;
+/// A mob's icon on the minimap, in GUI pixels; how far above or below the player a mob is
+/// still shown; how many mobs' icons are looked for in a frame.
+const MOB_ICON: f32 = 10.0;
+const MOB_HEIGHT: f64 = 24.0;
+const ICON_READS: usize = 4;
+/// Where resource packs keep icons of mobs for minimaps (the layout Icon Fresh and other icon
+/// packs use): `<namespace>/<mob>.json` names a sprite for each texture the mob is drawn with.
+const ICON_DEFINITIONS: &str = "assets/xaerominimap/entity/icon/definition";
+const ICON_SPRITES: &str = "assets/xaerominimap/entity/icon/sprite";
+
+/// A mob round the player: its type (`minecraft:cow`), the texture it is drawn with
+/// (`entity/cow/cow_temperate`) and where it is; `key` is both, its icon's name.
+struct Mob {
+    key: String,
+    kind: String,
+    texture: String,
+    position: [f64; 3],
+}
+
+impl Mob {
+    fn new(kind: String, texture: String, position: [f64; 3]) -> Self {
+        Self { key: format!("{kind}|{texture}"), kind, texture, position }
+    }
+}
+
+/// The icons read from the resource packs, and their pixels.
+#[derive(Default)]
+struct Icons {
+    /// The resources they were read from (`native_block_sprites_version`).
+    version: u64,
+    /// The cell of each mob's icon by `Mob::key`, None when the packs have none for it.
+    cells: std::collections::HashMap<String, Option<usize>>,
+    /// Each mob type's definition: its keys and sprites, in the file's order.
+    definitions: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// The cell of each sprite read, by its path.
+    sprites: std::collections::HashMap<String, usize>,
+    /// The cells, `ICON_COLS` a row: `ICON_COLS * ICON_CELL` pixels wide.
+    sheet: Vec<u8>,
+    /// There are cells the mod's image doesn't have.
+    dirty: bool,
+}
+
+impl Icons {
+    /// The cell of the icon for a mob of type `kind` drawn with `texture`, reading its
+    /// definition and its sprite with `read` the first time.
+    fn icon_for(&mut self, kind: &str, texture: &str, read: impl Fn(&str) -> Option<Vec<u8>>) -> Option<usize> {
+        let (namespace, name) = kind.split_once(':').unwrap_or(("minecraft", kind));
+        let definition = self.definitions.entry(kind.to_owned()).or_insert_with(|| {
+            read(&format!("{ICON_DEFINITIONS}/{namespace}/{name}.json"))
+                .map(|bytes| icon_definition(&bytes))
+                .unwrap_or_default()
+        });
+        let (sprite, outlined) = icon_sprite(pick_icon(definition, &texture_key(texture))?)?;
+        let path = format!("{ICON_SPRITES}/{sprite}");
+        if let Some(&cell) = self.sprites.get(&path) {
+            return Some(cell);
+        }
+        let cell = self.sprites.len();
+        if cell == ICON_COLS * ICON_ROWS {
+            return None;
+        }
+        let (w, h, rgba) = horizon_client::hud::decode_bytes(&read(&path)?).ok()?;
+        if w == 0 || h == 0 || w > 512 || h > 512 {
+            return None;
+        }
+        let pixels = icon_cell(w as usize, h as usize, &rgba, outlined);
+        let sheet_w = ICON_COLS * ICON_CELL;
+        let row = cell / ICON_COLS;
+        if self.sheet.len() < (row + 1) * ICON_CELL * sheet_w * 4 {
+            self.sheet.resize((row + 1) * ICON_CELL * sheet_w * 4, 0);
+        }
+        let x = cell % ICON_COLS * ICON_CELL;
+        for (y, line) in pixels.chunks_exact(ICON_CELL * 4).enumerate() {
+            let at = ((row * ICON_CELL + y) * sheet_w + x) * 4;
+            self.sheet[at..at + ICON_CELL * 4].copy_from_slice(line);
+        }
+        self.sprites.insert(path, cell);
+        self.dirty = true;
+        Some(cell)
+    }
+}
+
+/// Where cell `cell` is in the mod's image, in its pixels.
+fn icon_at(cell: usize) -> [f32; 2] {
+    [(ICON_X + cell % ICON_COLS * ICON_CELL) as f32, (cell / ICON_COLS * ICON_CELL) as f32]
+}
+
+/// The keys of an icon definition (`{"variants": {"<key>": "<sprite>", ...}}`) with their
+/// sprites, in the file's order (the first that fits a mob is its icon); entries that are not
+/// a sprite, such as `layersAllowed` or a comment, are left out. Nothing for a file that
+/// doesn't read.
+fn icon_definition(bytes: &[u8]) -> Vec<(String, String)> {
+    struct Variants(Vec<(String, String)>);
+    impl<'de> serde::Deserialize<'de> for Variants {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct Visit;
+            impl<'de> serde::de::Visitor<'de> for Visit {
+                type Value = Variants;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("an object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Variants, A::Error> {
+                    let mut out = Vec::new();
+                    while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                        if let serde_json::Value::String(sprite) = value
+                            && icon_sprite(&sprite).is_some()
+                        {
+                            out.push((key, sprite));
+                        }
+                    }
+                    Ok(Variants(out))
+                }
+            }
+            d.deserialize_map(Visit)
+        }
+    }
+    #[derive(serde::Deserialize)]
+    struct Definition {
+        variants: Variants,
+    }
+    let text = String::from_utf8_lossy(bytes);
+    serde_json::from_str::<Definition>(text.trim_start_matches('\u{feff}'))
+        .map(|d| d.variants.0)
+        .unwrap_or_default()
+}
+
+/// A definition's name for a texture: `entity/cow/cow_temperate` is
+/// `minecraft:textures/entity/cow/cow_temperate.png`.
+fn texture_key(texture: &str) -> String {
+    let (namespace, path) = texture.split_once(':').unwrap_or(("minecraft", texture));
+    let path = path.strip_suffix(".png").unwrap_or(path);
+    format!("{namespace}:textures/{path}.png")
+}
+
+/// The sprite a definition has for a mob drawn with texture `key`: the entry of that texture,
+/// else the first of that texture with more after it (`<key>%<more>`, such as a horse's
+/// markings, which the minimap doesn't know), else the same for the texture without the
+/// number a random texture pack adds (`cow2.png` is `cow.png`), else `default`.
+fn pick_icon<'a>(definition: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    let find = |key: &str| {
+        let more = format!("{key}%");
+        definition
+            .iter()
+            .find(|(k, _)| k == key)
+            .or_else(|| definition.iter().find(|(k, _)| k.starts_with(&more)))
+    };
+    let plain = key
+        .strip_suffix(".png")
+        .map(|stem| format!("{}.png", stem.trim_end_matches(|c: char| c.is_ascii_digit())))
+        .filter(|plain| plain != key);
+    find(key)
+        .or_else(|| plain.as_deref().and_then(find))
+        .or_else(|| definition.iter().find(|(k, _)| k == "default"))
+        .map(|(_, sprite)| sprite.as_str())
+}
+
+/// A definition's sprite, `outlined_sprite:<path>` or `sprite:<path>`: its path under
+/// `ICON_SPRITES`, and whether it has an outline.
+fn icon_sprite(sprite: &str) -> Option<(&str, bool)> {
+    let (path, outlined) = if let Some(path) = sprite.strip_prefix("outlined_sprite:") {
+        (path, true)
+    } else {
+        (sprite.strip_prefix("sprite:")?, false)
+    };
+    let plain = |p: &str| !p.is_empty() && p != "." && p != ".." && !p.contains('\\');
+    (path.ends_with(".png") && path.split('/').all(plain)).then_some((path, outlined))
+}
+
+/// A sprite (`w` by `h`, RGBA) made a cell: fitted into the middle `ICON_CELL - 2` pixels
+/// square, its pixels averaged when it is bigger, and, when `outlined`, dark round its edge.
+fn icon_cell(w: usize, h: usize, rgba: &[u8], outlined: bool) -> Vec<u8> {
+    let inner = ICON_CELL - 2;
+    let (ow, oh) = if w >= h {
+        (inner, (h * inner / w).max(1))
+    } else {
+        ((w * inner / h).max(1), inner)
+    };
+    let (left, top) = ((ICON_CELL - ow) / 2, (ICON_CELL - oh) / 2);
+    let mut out = vec![0u8; ICON_CELL * ICON_CELL * 4];
+    for oy in 0..oh {
+        let (y0, y1) = (oy * h / oh, ((oy + 1) * h / oh).max(oy * h / oh + 1));
+        for ox in 0..ow {
+            let (x0, x1) = (ox * w / ow, ((ox + 1) * w / ow).max(ox * w / ow + 1));
+            // Weighted by alpha, so that clear pixels don't darken the edge.
+            let mut sum = [0u32; 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = &rgba[(y * w + x) * 4..][..4];
+                    let a = u32::from(p[3]);
+                    for c in 0..3 {
+                        sum[c] += u32::from(p[c]) * a;
+                    }
+                    sum[3] += a;
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            let at = ((top + oy) * ICON_CELL + left + ox) * 4;
+            if sum[3] > 0 {
+                for c in 0..3 {
+                    out[at + c] = (sum[c] / sum[3]) as u8;
+                }
+            }
+            out[at + 3] = (sum[3] / n) as u8;
+        }
+    }
+    if outlined {
+        let solid = |x: usize, y: usize| out[(y * ICON_CELL + x) * 4 + 3] >= 128;
+        let mut edge = Vec::new();
+        for y in 0..ICON_CELL {
+            for x in 0..ICON_CELL {
+                let near = (y.saturating_sub(1)..(y + 2).min(ICON_CELL))
+                    .any(|ny| (x.saturating_sub(1)..(x + 2).min(ICON_CELL)).any(|nx| solid(nx, ny)));
+                if out[(y * ICON_CELL + x) * 4 + 3] < 128 && near {
+                    edge.push((y * ICON_CELL + x) * 4);
+                }
+            }
+        }
+        for at in edge {
+            out[at..at + 4].copy_from_slice(&[16, 16, 20, 230]);
+        }
+    }
+    out
+}
+
 // -- Settings ------------------------------------------------------------------
 
 /// The settings page's switches: file name and label.
-const SETTINGS: [(&str, &str); 7] = [
+const SETTINGS: [(&str, &str); 8] = [
     ("trail", "Player trail"),
     ("markers", "Markers in the world"),
     ("death", "Waypoint on death"),
@@ -2197,6 +2490,7 @@ const SETTINGS: [(&str, &str); 7] = [
     ("lighting", "Day and night on the map"),
     ("minimap", "Minimap"),
     ("minimap_rotate", "Rotate the minimap"),
+    ("mobs", "Mobs on the minimap"),
 ];
 
 /// The switches, all on until the player turns one off.
@@ -2206,6 +2500,8 @@ struct Settings {
     markers: bool,
     death: bool,
     players: bool,
+    /// Mobs on the minimap: their icons from the resource packs, else dots.
+    mobs: bool,
     /// The surface is dark at night, and lit blocks shine.
     lighting: bool,
     /// The minimap in the game, its corner (a place in `MINI_CORNERS`) and its size.
@@ -2223,6 +2519,7 @@ impl Default for Settings {
             markers: true,
             death: true,
             players: true,
+            mobs: true,
             lighting: true,
             minimap: true,
             corner: 0,
@@ -2234,7 +2531,7 @@ impl Default for Settings {
 
 impl Settings {
     fn get(&self, i: usize) -> bool {
-        [self.trail, self.markers, self.death, self.players, self.lighting, self.minimap, self.rotate]
+        [self.trail, self.markers, self.death, self.players, self.lighting, self.minimap, self.rotate, self.mobs]
             .get(i)
             .copied()
             .unwrap_or(false)
@@ -2249,6 +2546,7 @@ impl Settings {
             4 => self.lighting = on,
             5 => self.minimap = on,
             6 => self.rotate = on,
+            7 => self.mobs = on,
             _ => {}
         }
     }
@@ -2462,26 +2760,61 @@ pub fn frame(game: &mut Game<'_>) {
     });
     if let Some((w, h, rgba)) = upload {
         game.native_mod_image(w as u32, h as u32, &rgba);
+        // Over the mob icons too: they go in again with the minimap.
+        with(|s| s.icons.dirty = true);
     }
-    // The other players, four times a second (the game copies every creature to tell them).
-    let want_players = with(|s| {
-        s.settings.players
-            && (s.settings.minimap || open)
-            && s.players_at.elapsed() >= Duration::from_millis(250)
+    // The other players and the mobs, four times a second (the game copies every creature to
+    // tell them). The mobs are only on the minimap.
+    let (want_players, want_mobs) = with(|s| {
+        let due = s.players_at.elapsed() >= Duration::from_millis(250);
+        (
+            due && s.settings.players && (s.settings.minimap || open),
+            due && s.settings.mobs && s.settings.minimap && !open,
+        )
     });
-    if want_players {
-        let list: Vec<(String, [f64; 3])> = game
-            .native_client_entities()
-            .into_iter()
-            .filter(|e| e.alive && !e.invisible)
-            .filter_map(|e| e.player_name.map(|name| (name, e.position)))
-            .collect();
+    if want_players || want_mobs {
+        let (mut players, mut mobs) = (Vec::new(), Vec::new());
+        for e in game.native_client_entities() {
+            if !e.alive || e.invisible || e.spectator {
+                continue;
+            }
+            match e.player_name {
+                Some(name) if want_players => players.push((name, e.position)),
+                None if want_mobs => mobs.push(Mob::new(e.kind, e.texture.unwrap_or_default(), e.position)),
+                _ => {}
+            }
+        }
         with(|s| {
-            s.players = list;
+            s.players = players;
+            s.mobs = mobs;
             s.players_at = Instant::now();
         });
     } else if with(|s| !s.settings.players && !s.players.is_empty()) {
         with(|s| s.players.clear());
+    }
+    // The icons of mobs seen for the first time, a few a frame (each is a file or two to read),
+    // read again when a resource pack is turned on or off.
+    let version = game.native_block_sprites_version();
+    if with(|s| s.icons.version != version || s.mobs.iter().any(|m| !s.icons.cells.contains_key(&m.key))) {
+        let resources = game.native_client_resources();
+        with(|s| {
+            if s.icons.version != version {
+                s.icons = Icons { version, ..Icons::default() };
+            }
+            let mut new: Vec<(String, String, String)> = Vec::new();
+            for m in &s.mobs {
+                if new.len() == ICON_READS {
+                    break;
+                }
+                if !s.icons.cells.contains_key(&m.key) && !new.iter().any(|n| n.0 == m.key) {
+                    new.push((m.key.clone(), m.kind.clone(), m.texture.clone()));
+                }
+            }
+            for (key, kind, texture) in new {
+                let cell = s.icons.icon_for(&kind, &texture, |path| resources.read(path));
+                s.icons.cells.insert(key, cell);
+            }
+        });
     }
     // The minimap shares the image with the map screen: it draws its own when the screen is shut.
     let mini = with(|s| {
@@ -2493,6 +2826,11 @@ pub fn frame(game: &mut Game<'_>) {
     });
     if let Some((size, rgba)) = mini {
         game.native_mod_image(size as u32, size as u32, &rgba);
+    }
+    // The mob icons, beside the minimap in the image, when there are new ones or the map
+    // screen drew over them.
+    if let Some((w, h, rgba)) = with(State::icon_upload) {
+        game.native_mod_image(w as u32, h as u32, &rgba);
     }
     // What the map has to tell, in the chat.
     for line in with(|s| std::mem::take(&mut s.notes)) {
@@ -4329,6 +4667,120 @@ fn mul(m: &[f32; 16], v: [f32; 4]) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A definition as icon packs write them (Icon Fresh's horse and cat), with a comment and
+    // `layersAllowed` among the sprites.
+    const HORSE: &str = r#"{ "variants": {
+        "comment": "lvl stone",
+        "minecraft:textures/entity/horse/horse_white.png%minecraft:textures/entity/horse/horse_markings_white.png": "outlined_sprite:minecraft/horse/white_marked.png",
+        "minecraft:textures/entity/horse/horse_white.png%null": "outlined_sprite:minecraft/horse/white.png",
+        "minecraft:textures/entity/cow/cow_temperate.png": "sprite:minecraft/cow/temperate.png",
+        "default": "outlined_sprite:minecraft/horse/brown.png",
+        "layersAllowed": true
+    } }"#;
+
+    #[test]
+    fn an_icon_definition_keeps_its_sprites_in_order() {
+        let d = icon_definition(HORSE.as_bytes());
+        let keys: Vec<&str> = d.iter().map(|(k, _)| k.rsplit('/').next().unwrap()).collect();
+        assert_eq!(keys, ["horse_markings_white.png", "horse_white.png%null", "cow_temperate.png", "default"]);
+        assert!(icon_definition(b"not json").is_empty());
+        assert!(icon_definition("\u{feff}{\"variants\":{}}".as_bytes()).is_empty());
+        assert_eq!(icon_sprite("outlined_sprite:minecraft/cow/a.png"), Some(("minecraft/cow/a.png", true)));
+        assert_eq!(icon_sprite("sprite:minecraft/cow/a.png"), Some(("minecraft/cow/a.png", false)));
+        assert_eq!(icon_sprite("sprite:../a.png"), None);
+        assert_eq!(icon_sprite("lvl stone"), None);
+    }
+
+    #[test]
+    fn a_mob_gets_the_icon_of_its_texture_else_the_default() {
+        let d = icon_definition(HORSE.as_bytes());
+        let pick = |texture: &str| pick_icon(&d, &texture_key(texture));
+        assert_eq!(texture_key("entity/cow/cow_temperate"), "minecraft:textures/entity/cow/cow_temperate.png");
+        assert_eq!(texture_key("mymod:entity/gear.png"), "mymod:textures/entity/gear.png");
+        assert_eq!(pick("entity/cow/cow_temperate"), Some("sprite:minecraft/cow/temperate.png"));
+        // The first entry of the texture with more after it.
+        assert_eq!(pick("entity/horse/horse_white"), Some("outlined_sprite:minecraft/horse/white_marked.png"));
+        // A random texture pack's second cow.
+        assert_eq!(pick("entity/cow/cow_temperate2"), Some("sprite:minecraft/cow/temperate.png"));
+        assert_eq!(pick("entity/horse/horse_black"), Some("outlined_sprite:minecraft/horse/brown.png"));
+        assert_eq!(pick_icon(&[], "minecraft:textures/entity/pig.png"), None);
+    }
+
+    #[test]
+    fn a_sprite_is_fitted_into_its_cell_with_an_outline() {
+        // 64 x 64: a red square in the middle 32 x 32, clear round it.
+        let mut rgba = vec![0u8; 64 * 64 * 4];
+        for y in 16..48 {
+            for x in 16..48 {
+                rgba[(y * 64 + x) * 4..][..4].copy_from_slice(&[200, 0, 0, 255]);
+            }
+        }
+        let cell = icon_cell(64, 64, &rgba, true);
+        assert_eq!(cell.len(), ICON_CELL * ICON_CELL * 4);
+        let px = |x: usize, y: usize| &cell[(y * ICON_CELL + x) * 4..][..4];
+        // Halved: the square is 16 x 16 from 9 to 24, the outline round it, clear past that.
+        assert_eq!(px(9, 9), [200, 0, 0, 255]);
+        assert_eq!(px(24, 24), [200, 0, 0, 255]);
+        assert_eq!(px(8, 16), [16, 16, 20, 230]);
+        assert_eq!(px(25, 25), [16, 16, 20, 230]);
+        assert_eq!(px(7, 16)[3], 0);
+        assert_eq!(icon_cell(64, 64, &rgba, false)[(8 * ICON_CELL + 16) * 4 + 3], 0);
+        // A tall sprite keeps its shape: 16 x 32 is 16 wide in the middle.
+        let tall = icon_cell(16, 32, &vec![255; 16 * 32 * 4], false);
+        let row: Vec<u8> = (0..ICON_CELL).map(|x| tall[(17 * ICON_CELL + x) * 4 + 3]).collect();
+        assert_eq!(row.iter().filter(|&&a| a == 255).count(), 16);
+        assert_eq!(row[9..25], [255; 16]);
+    }
+
+    #[test]
+    fn icons_are_read_once_and_go_beside_the_minimap() {
+        fn png(rgba: [u8; 4]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut encoder = png::Encoder::new(&mut out, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&rgba.repeat(4)).unwrap();
+            out
+        }
+        let reads = std::cell::Cell::new(0);
+        let read = |path: &str| {
+            reads.set(reads.get() + 1);
+            match path {
+                "assets/xaerominimap/entity/icon/definition/minecraft/horse.json" => Some(HORSE.as_bytes().to_vec()),
+                "assets/xaerominimap/entity/icon/sprite/minecraft/horse/brown.png" => Some(png([1, 2, 3, 255])),
+                "assets/xaerominimap/entity/icon/sprite/minecraft/horse/white.png" => Some(png([4, 5, 6, 255])),
+                _ => None,
+            }
+        };
+        let mut icons = Icons::default();
+        assert_eq!(icons.icon_for("minecraft:horse", "entity/horse/horse_black", read), Some(0));
+        assert_eq!(icons.icon_for("minecraft:horse", "entity/horse/horse_chestnut", read), Some(0));
+        assert_eq!(reads.get(), 2);
+        // White's first entry is the marked one, which this pack lacks.
+        assert_eq!(icons.icon_for("minecraft:horse", "entity/horse/horse_white", read), None);
+        assert_eq!(icons.icon_for("minecraft:pig", "entity/pig/pig", read), None);
+        assert_eq!(icons.icon_for("minecraft:pig", "entity/pig/pig", read), None);
+        assert_eq!(reads.get(), 4);
+        assert!(icons.dirty);
+        assert_eq!(icons.sheet.len(), ICON_COLS * ICON_CELL * ICON_CELL * 4);
+        assert_eq!(icon_at(0), [ICON_X as f32, 0.0]);
+        assert_eq!(icon_at(ICON_COLS + 1), [(ICON_X + ICON_CELL) as f32, ICON_CELL as f32]);
+
+        // Into the image right of the minimap, once, and only while the image is the minimap's.
+        let mut s = State::new();
+        let size = s.mini_size() as usize;
+        s.icons = icons;
+        assert!(s.icon_upload().is_none());
+        s.slot = 2;
+        s.map.image = vec![9; size * size * 4];
+        let (w, h, rgba) = s.icon_upload().unwrap();
+        assert_eq!((w, h), (ICON_X + ICON_COLS * ICON_CELL, size.max(ICON_CELL)));
+        assert_eq!(rgba[..4], [9, 9, 9, 9]);
+        let middle = ((ICON_CELL / 2) * w + ICON_X + ICON_CELL / 2) * 4;
+        assert_eq!(rgba[middle..middle + 4], [1, 2, 3, 255]);
+        assert!(s.icon_upload().is_none());
+    }
 
     #[test]
     fn waypoint_lines_come_from_this_mod_and_from_others() {
